@@ -1,0 +1,51 @@
+# Docker 忽略文件
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+.venv/
+venv/
+ENV/
+env/
+
+# 数据库文件（将通过volume挂载）
+data.db
+data.db-wal
+data.db-shm
+booking.db
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# Git
+.git/
+.gitignore
+
+# Docker相关
+Dockerfile
+docker-compose.yml
+DOCKER_COMMANDS.md
+
+# 测试和文档
+tests/
+*.md
+!README.md
+
+# 临时文件
+*.log
+*.tmp
+captcha.jpg
+
+# 备份文件
+*_backup.html
+
+# Windows 特定
+Thumbs.db
+Desktop.ini
+
+# macOS
+.DS_Store

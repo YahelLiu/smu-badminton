@@ -1,0 +1,1031 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>任务监控 - 羽毛球预约</title>
+    <style>
+        /* CSS 变量 - 主题配色 */
+        :root {
+            --primary: #3B82F6;
+            --primary-hover: #2563EB;
+            --success: #10B981;
+            --danger: #EF4444;
+            --warning: #F59E0B;
+            --bg-primary: #F3F4F6;
+            --bg-secondary: #FFFFFF;
+            --text-primary: #1F2937;
+            --text-secondary: #6B7280;
+            --border: #E5E7EB;
+            --shadow: rgba(0, 0, 0, 0.1);
+            --radius: 8px;
+            --transition: all 0.2s ease;
+        }
+
+        /* 暗色主题 */
+        [data-theme="dark"] {
+            --primary: #60A5FA;
+            --primary-hover: #3B82F6;
+            --success: #34D399;
+            --danger: #F87171;
+            --warning: #FBBF24;
+            --bg-primary: #111827;
+            --bg-secondary: #1F2937;
+            --text-primary: #F9FAFB;
+            --text-secondary: #9CA3AF;
+            --border: #374151;
+            --shadow: rgba(0, 0, 0, 0.3);
+        }
+
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', 'PingFang SC', 'Hiragino Sans GB', 'Microsoft YaHei', 'Helvetica Neue', Arial, sans-serif;
+            background: var(--bg-primary);
+            color: var(--text-primary);
+            min-height: 100vh;
+            transition: var(--transition);
+            font-size: 14px;
+            line-height: 1.5;
+        }
+
+        /* 容器 */
+        .container {
+            max-width: 1200px;
+            margin: 0 auto;
+            padding: 24px;
+        }
+
+        /* 头部 */
+        .header {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            margin-bottom: 24px;
+            padding: 20px 24px;
+            background: var(--bg-secondary);
+            border-radius: var(--radius);
+            box-shadow: 0 1px 3px var(--shadow);
+        }
+
+        .header-left {
+            display: flex;
+            align-items: center;
+            gap: 16px;
+        }
+
+        .logo {
+            font-size: 22px;
+            font-weight: 700;
+            color: var(--primary);
+        }
+
+        .logo::before {
+            content: "📋";
+            margin-right: 8px;
+        }
+
+        .back-link {
+            display: inline-flex;
+            align-items: center;
+            gap: 6px;
+            color: var(--text-secondary);
+            text-decoration: none;
+            font-size: 14px;
+            padding: 8px 12px;
+            border-radius: var(--radius);
+            transition: var(--transition);
+        }
+
+        .back-link:hover {
+            background: var(--bg-primary);
+            color: var(--primary);
+        }
+
+        .header-right {
+            display: flex;
+            align-items: center;
+            gap: 12px;
+        }
+
+        /* 按钮 */
+        .btn {
+            display: inline-flex;
+            align-items: center;
+            justify-content: center;
+            gap: 6px;
+            padding: 8px 16px;
+            border: none;
+            border-radius: var(--radius);
+            font-size: 14px;
+            font-weight: 500;
+            cursor: pointer;
+            transition: var(--transition);
+        }
+
+        .btn-primary {
+            background: var(--primary);
+            color: white;
+        }
+
+        .btn-primary:hover {
+            background: var(--primary-hover);
+        }
+
+        .btn-danger {
+            background: var(--danger);
+            color: white;
+        }
+
+        .btn-danger:hover {
+            background: #DC2626;
+        }
+
+        .btn-outline {
+            background: transparent;
+            border: 1px solid var(--border);
+            color: var(--text-primary);
+        }
+
+        .btn-outline:hover {
+            background: var(--bg-primary);
+            border-color: var(--primary);
+        }
+
+        .btn-icon {
+            width: 36px;
+            height: 36px;
+            padding: 0;
+            border-radius: 50%;
+        }
+
+        .btn-sm {
+            padding: 6px 12px;
+            font-size: 13px;
+        }
+
+        /* 统计卡片 */
+        .stats {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+            gap: 16px;
+            margin-bottom: 24px;
+        }
+
+        .stat-card {
+            background: var(--bg-secondary);
+            padding: 20px;
+            border-radius: var(--radius);
+            box-shadow: 0 1px 3px var(--shadow);
+        }
+
+        .stat-value {
+            font-size: 32px;
+            font-weight: 700;
+            color: var(--primary);
+            margin-bottom: 4px;
+        }
+
+        .stat-label {
+            font-size: 14px;
+            color: var(--text-secondary);
+        }
+
+        .stat-card.success .stat-value {
+            color: var(--success);
+        }
+
+        .stat-card.warning .stat-value {
+            color: var(--warning);
+        }
+
+        .stat-card.danger .stat-value {
+            color: var(--danger);
+        }
+
+        /* 主内容 */
+        .main-content {
+            background: var(--bg-secondary);
+            border-radius: var(--radius);
+            box-shadow: 0 1px 3px var(--shadow);
+            overflow: hidden;
+        }
+
+        .content-header {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            padding: 16px 20px;
+            border-bottom: 1px solid var(--border);
+        }
+
+        .content-title {
+            font-size: 16px;
+            font-weight: 600;
+        }
+
+        /* 表格 */
+        .table-container {
+            overflow-x: auto;
+        }
+
+        .jobs-table {
+            width: 100%;
+            border-collapse: collapse;
+        }
+
+        .jobs-table th,
+        .jobs-table td {
+            padding: 14px 16px;
+            text-align: left;
+            border-bottom: 1px solid var(--border);
+        }
+
+        .jobs-table th {
+            background: var(--bg-primary);
+            font-size: 13px;
+            font-weight: 600;
+            color: var(--text-secondary);
+            text-transform: uppercase;
+            letter-spacing: 0.5px;
+        }
+
+        .jobs-table tr:hover {
+            background: var(--bg-primary);
+        }
+
+        .jobs-table td {
+            font-size: 14px;
+        }
+
+        /* Job ID */
+        .job-id {
+            font-family: 'Monaco', 'Menlo', monospace;
+            font-size: 12px;
+            color: var(--text-secondary);
+            background: var(--bg-primary);
+            padding: 4px 8px;
+            border-radius: 4px;
+        }
+
+        /* 状态徽章 */
+        .status-badge {
+            display: inline-flex;
+            align-items: center;
+            gap: 6px;
+            padding: 4px 10px;
+            border-radius: 20px;
+            font-size: 12px;
+            font-weight: 500;
+        }
+
+        .status-badge.running {
+            background: rgba(59, 130, 246, 0.1);
+            color: var(--primary);
+        }
+
+        .status-badge.running::before {
+            content: '';
+            width: 8px;
+            height: 8px;
+            background: var(--primary);
+            border-radius: 50%;
+            animation: pulse 1.5s infinite;
+        }
+
+        .status-badge.done {
+            background: rgba(16, 185, 129, 0.1);
+            color: var(--success);
+        }
+
+        .status-badge.failed {
+            background: rgba(239, 68, 68, 0.1);
+            color: var(--danger);
+        }
+
+        .status-badge.scheduled {
+            background: rgba(245, 158, 11, 0.1);
+            color: var(--warning);
+        }
+
+        @keyframes pulse {
+            0%, 100% { opacity: 1; }
+            50% { opacity: 0.4; }
+        }
+
+        /* 参数展示 */
+        .params-preview {
+            max-width: 300px;
+        }
+
+        .params-btn {
+            color: var(--primary);
+            background: none;
+            border: none;
+            cursor: pointer;
+            font-size: 13px;
+            text-decoration: underline;
+        }
+
+        .params-content {
+            font-family: 'Monaco', 'Menlo', monospace;
+            font-size: 12px;
+            background: var(--bg-primary);
+            padding: 12px;
+            border-radius: 6px;
+            white-space: pre-wrap;
+            word-break: break-all;
+            max-height: 200px;
+            overflow-y: auto;
+        }
+
+        /* 空状态 */
+        .empty-state {
+            text-align: center;
+            padding: 60px 20px;
+            color: var(--text-secondary);
+        }
+
+        .empty-icon {
+            font-size: 48px;
+            margin-bottom: 16px;
+        }
+
+        .empty-text {
+            font-size: 16px;
+            margin-bottom: 8px;
+        }
+
+        .empty-subtext {
+            font-size: 14px;
+            opacity: 0.7;
+        }
+
+        /* 加载状态 */
+        .loading {
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            padding: 60px;
+        }
+
+        .spinner {
+            width: 40px;
+            height: 40px;
+            border: 3px solid var(--border);
+            border-top-color: var(--primary);
+            border-radius: 50%;
+            animation: spin 0.8s linear infinite;
+        }
+
+        @keyframes spin {
+            to { transform: rotate(360deg); }
+        }
+
+        /* Toast */
+        .toast-container {
+            position: fixed;
+            top: 20px;
+            right: 20px;
+            z-index: 9999;
+            display: flex;
+            flex-direction: column;
+            gap: 10px;
+        }
+
+        .toast {
+            display: flex;
+            align-items: center;
+            gap: 12px;
+            padding: 14px 20px;
+            background: var(--bg-secondary);
+            border-radius: var(--radius);
+            box-shadow: 0 4px 12px var(--shadow);
+            animation: slideIn 0.3s ease;
+            max-width: 360px;
+        }
+
+        .toast.success { border-left: 4px solid var(--success); }
+        .toast.error { border-left: 4px solid var(--danger); }
+        .toast.info { border-left: 4px solid var(--primary); }
+
+        .toast-icon { font-size: 20px; }
+        .toast-content { flex: 1; }
+        .toast-title { font-weight: 600; font-size: 14px; }
+        .toast-message { font-size: 13px; color: var(--text-secondary); }
+        .toast-close {
+            background: none;
+            border: none;
+            font-size: 18px;
+            color: var(--text-secondary);
+            cursor: pointer;
+        }
+
+        @keyframes slideIn {
+            from { transform: translateX(100%); opacity: 0; }
+            to { transform: translateX(0); opacity: 1; }
+        }
+
+        /* 弹窗 */
+        dialog {
+            border: none;
+            border-radius: 12px;
+            box-shadow: 0 20px 40px rgba(0, 0, 0, 0.2);
+            padding: 0;
+            max-width: 500px;
+            width: 90%;
+            background: var(--bg-secondary);
+            color: var(--text-primary);
+        }
+
+        dialog::backdrop {
+            background: rgba(0, 0, 0, 0.5);
+            backdrop-filter: blur(4px);
+        }
+
+        .dialog-header {
+            padding: 20px 24px;
+            border-bottom: 1px solid var(--border);
+        }
+
+        .dialog-title {
+            font-size: 18px;
+            font-weight: 600;
+        }
+
+        .dialog-body {
+            padding: 24px;
+            max-height: 400px;
+            overflow-y: auto;
+        }
+
+        .dialog-footer {
+            padding: 16px 24px;
+            border-top: 1px solid var(--border);
+            display: flex;
+            justify-content: flex-end;
+            gap: 12px;
+        }
+
+        /* 响应式 */
+        @media (max-width: 768px) {
+            .container { padding: 12px; }
+            .header { flex-direction: column; gap: 12px; }
+            .stats { grid-template-columns: repeat(2, 1fr); }
+            .jobs-table th, .jobs-table td { padding: 10px 12px; font-size: 13px; }
+        }
+    </style>
+</head>
+<body>
+    <!-- Toast 容器 -->
+    <div class="toast-container" id="toast-container"></div>
+
+    <div class="container">
+        <!-- 头部 -->
+        <header class="header">
+            <div class="header-left">
+                <span class="logo">任务监控</span>
+                <a href="/" class="back-link">← 返回预约页面</a>
+            </div>
+            <div class="header-right">
+                <button class="btn btn-outline" id="configBtn">⚙️ 配置</button>
+                <button class="btn btn-outline" id="refreshBtn">🔄 刷新</button>
+                <button class="btn btn-icon btn-outline" id="themeBtn" title="切换主题">🌙</button>
+            </div>
+        </header>
+
+        <!-- 统计卡片 -->
+        <div class="stats">
+            <div class="stat-card">
+                <div class="stat-value" id="stat-total">0</div>
+                <div class="stat-label">总任务数</div>
+            </div>
+            <div class="stat-card warning">
+                <div class="stat-value" id="stat-running">0</div>
+                <div class="stat-label">运行中</div>
+            </div>
+            <div class="stat-card success">
+                <div class="stat-value" id="stat-done">0</div>
+                <div class="stat-label">已完成</div>
+            </div>
+            <div class="stat-card danger">
+                <div class="stat-value" id="stat-failed">0</div>
+                <div class="stat-label">已失败</div>
+            </div>
+        </div>
+
+        <!-- 任务列表 -->
+        <main class="main-content">
+            <div class="content-header">
+                <h2 class="content-title">任务列表</h2>
+                <span id="last-update" style="font-size: 13px; color: var(--text-secondary);">--</span>
+            </div>
+            <div class="table-container">
+                <table class="jobs-table" id="jobs-table">
+                    <thead>
+                        <tr>
+                            <th>Job ID</th>
+                            <th>类型</th>
+                            <th>创建时间</th>
+                            <th>状态</th>
+                            <th>参数</th>
+                            <th>操作</th>
+                        </tr>
+                    </thead>
+                    <tbody id="jobs-tbody">
+                        <tr>
+                            <td colspan="6">
+                                <div class="loading">
+                                    <div class="spinner"></div>
+                                </div>
+                            </td>
+                        </tr>
+                    </tbody>
+                </table>
+            </div>
+        </main>
+    </div>
+
+    <!-- 参数详情弹窗 -->
+    <dialog id="params-dialog">
+        <div class="dialog-header">
+            <h3 class="dialog-title">📄 任务参数</h3>
+        </div>
+        <div class="dialog-body">
+            <pre class="params-content" id="params-content"></pre>
+        </div>
+        <div class="dialog-footer">
+            <button class="btn btn-primary" id="params-close">关闭</button>
+        </div>
+    </dialog>
+
+    <!-- 配置弹窗 -->
+    <dialog id="config-dialog">
+        <div class="dialog-header">
+            <h3 class="dialog-title">⚙️ 系统配置</h3>
+        </div>
+        <div class="dialog-body">
+            <div style="display: flex; flex-direction: column; gap: 20px;">
+                <div>
+                    <label style="display: block; font-weight: 600; margin-bottom: 8px; font-size: 14px;">当前 Login URL</label>
+                    <div style="padding: 12px; background: var(--bg-primary); border-radius: 6px; font-size: 12px; word-break: break-all; max-height: 120px; overflow-y: auto; font-family: monospace;" id="current-login-url">
+                        加载中...
+                    </div>
+                </div>
+                <div>
+                    <label for="new-login-url" style="display: block; font-weight: 600; margin-bottom: 8px; font-size: 14px;">新的 Login URL</label>
+                    <textarea 
+                        id="new-login-url" 
+                        placeholder="输入新的 Login URL"
+                        style="width: 100%; min-height: 100px; padding: 12px; border: 1px solid var(--border); border-radius: 6px; background: var(--bg-primary); color: var(--text-primary); font-size: 13px; font-family: monospace; resize: vertical;"
+                    ></textarea>
+                    <div style="margin-top: 8px; font-size: 12px; color: var(--text-secondary);">
+                        ✅ 配置修改后会自动重载，立即生效（无需重启）
+                    </div>
+                </div>
+            </div>
+        </div>
+        <div class="dialog-footer">
+            <button class="btn btn-outline" id="config-cancel">取消</button>
+            <button class="btn btn-primary" id="config-save">保存</button>
+        </div>
+    </dialog>
+
+    <!-- 登录弹窗 -->
+    <dialog id="login-dialog">
+        <div class="dialog-header">
+            <h3 class="dialog-title">🔐 登录验证</h3>
+        </div>
+        <form id="login-form">
+            <div class="dialog-body">
+                <div style="display: flex; flex-direction: column; gap: 16px;">
+                    <div style="display: flex; flex-direction: column; gap: 6px;">
+                        <label for="login-username" style="font-size: 14px; font-weight: 500;">学号</label>
+                        <input type="text" id="login-username" autocomplete="username" placeholder="请输入学号"
+                            style="width: 100%; padding: 12px 16px; border: 1px solid var(--border); border-radius: var(--radius); background: var(--bg-primary); color: var(--text-primary); font-size: 14px;">
+                    </div>
+                    <div style="display: flex; flex-direction: column; gap: 6px;">
+                        <label for="login-password" style="font-size: 14px; font-weight: 500;">密码</label>
+                        <div style="position: relative;">
+                            <input type="password" id="login-password" autocomplete="current-password" placeholder="请输入密码"
+                                style="width: 100%; padding: 12px 16px; border: 1px solid var(--border); border-radius: var(--radius); background: var(--bg-primary); color: var(--text-primary); font-size: 14px;">
+                            <button type="button" id="togglePwd" 
+                                style="position: absolute; right: 12px; top: 50%; transform: translateY(-50%); background: none; border: none; color: var(--text-secondary); cursor: pointer; font-size: 13px;">
+                                显示
+                            </button>
+                        </div>
+                    </div>
+                </div>
+            </div>
+            <div class="dialog-footer">
+                <button type="button" class="btn btn-outline" id="login-cancel">取消</button>
+                <button type="submit" class="btn btn-primary">登录</button>
+            </div>
+        </form>
+    </dialog>
+
+    <script>
+        // ============ 本地存储管理 ============
+        const Auth = {
+            save(auth) {
+                try { localStorage.setItem('bb_auth', JSON.stringify(auth)); } catch(e) {}
+            },
+            load() {
+                try { 
+                    const s = localStorage.getItem('bb_auth'); 
+                    return s ? JSON.parse(s) : null; 
+                } catch(e) { return null; }
+            },
+            clear() {
+                try { localStorage.removeItem('bb_auth'); } catch(e) {}
+            }
+        };
+
+        // 全局认证对象
+        window.__auth = null;
+
+        // ============ 登录对话框 ============
+        const loginDialog = document.getElementById('login-dialog');
+        const loginForm = document.getElementById('login-form');
+        const loginUsernameEl = document.getElementById('login-username');
+        const loginPasswordEl = document.getElementById('login-password');
+        const togglePwdBtn = document.getElementById('togglePwd');
+        const loginCancelBtn = document.getElementById('login-cancel');
+
+        function promptLogin() {
+            return new Promise(resolve => {
+                togglePwdBtn.onclick = () => {
+                    const isPwd = loginPasswordEl.type === 'password';
+                    loginPasswordEl.type = isPwd ? 'text' : 'password';
+                    togglePwdBtn.textContent = isPwd ? '隐藏' : '显示';
+                };
+
+                loginCancelBtn.onclick = () => { 
+                    loginDialog.close(); 
+                    resolve(false); 
+                };
+                
+                loginForm.onsubmit = (e) => {
+                    e.preventDefault();
+                    const u = (loginUsernameEl.value || '').trim();
+                    const p = (loginPasswordEl.value || '').trim();
+                    if (!u || !p) {
+                        Toast.error('登录失败', '请输入学号与密码');
+                        return;
+                    }
+                    
+                    // 验证是否为授权用户
+                    if (u !== '202540510004') {
+                        Toast.error('权限不足', '您没有权限访问该页面');
+                        return;
+                    }
+                    
+                    window.__auth = { username: u, password: p };
+                    Auth.save(window.__auth);
+                    loginDialog.close();
+                    resolve(true);
+                };
+
+                // 预填缓存
+                const cached = Auth.load();
+                if (cached) {
+                    loginUsernameEl.value = cached.username || '';
+                    loginPasswordEl.value = cached.password || '';
+                }
+
+                loginDialog.showModal();
+            });
+        }
+
+        // ============ Toast 通知系统 ============
+        const Toast = {
+            container: document.getElementById('toast-container'),
+            
+            show(type, title, message, duration = 3000) {
+                const icons = { success: '✅', error: '❌', info: 'ℹ️' };
+                const toast = document.createElement('div');
+                toast.className = `toast ${type}`;
+                toast.innerHTML = `
+                    <span class="toast-icon">${icons[type] || 'ℹ️'}</span>
+                    <div class="toast-content">
+                        <div class="toast-title">${title}</div>
+                        ${message ? `<div class="toast-message">${message}</div>` : ''}
+                    </div>
+                    <button class="toast-close">×</button>
+                `;
+                
+                toast.querySelector('.toast-close').onclick = () => this.remove(toast);
+                this.container.appendChild(toast);
+                
+                if (duration > 0) setTimeout(() => this.remove(toast), duration);
+                return toast;
+            },
+            
+            remove(toast) {
+                toast.style.animation = 'slideOut 0.3s ease forwards';
+                setTimeout(() => toast.remove(), 300);
+            },
+            
+            success(title, message) { return this.show('success', title, message); },
+            error(title, message) { return this.show('error', title, message); },
+            info(title, message) { return this.show('info', title, message); }
+        };
+
+        // ============ 主题切换 ============
+        const Theme = {
+            init() {
+                const saved = localStorage.getItem('theme') || 'light';
+                this.set(saved);
+            },
+            set(theme) {
+                document.documentElement.setAttribute('data-theme', theme);
+                localStorage.setItem('theme', theme);
+                document.getElementById('themeBtn').textContent = theme === 'dark' ? '☀️' : '🌙';
+            },
+            toggle() {
+                const current = document.documentElement.getAttribute('data-theme') || 'light';
+                this.set(current === 'dark' ? 'light' : 'dark');
+            }
+        };
+
+        // ============ DOM 元素 ============
+        const tbody = document.getElementById('jobs-tbody');
+        const paramsDialog = document.getElementById('params-dialog');
+        const paramsContent = document.getElementById('params-content');
+
+        // ============ 获取任务列表 ============
+        async function fetchJobs() {
+            try {
+                const resp = await fetch('/api/jobs');
+                const data = await resp.json();
+
+                if (!data.ok) {
+                    tbody.innerHTML = `
+                        <tr>
+                            <td colspan="6">
+                                <div class="empty-state">
+                                    <div class="empty-icon">❌</div>
+                                    <div class="empty-text">加载失败</div>
+                                </div>
+                            </td>
+                        </tr>
+                    `;
+                    return;
+                }
+
+                // 合并活跃任务和数据库历史任务
+                const memoryJobs = data.data.jobs || [];
+                const dbJobs = data.data.db_jobs || [];
+
+                // 构建内存任务的ID映射（用于去重）
+                const memoryJobIds = new Set(memoryJobs.map(j => j.job_id));
+
+                // 将数据库任务转换为统一格式，并过滤掉内存中已有的
+                const dbJobsFormatted = dbJobs
+                    .filter(j => !memoryJobIds.has(j.job_id))
+                    .map(j => ({
+                        job_id: j.job_id,
+                        alive: false, // 数据库中的都是已结束的
+                        type: j.target_time_str ? 'scheduled' : 'immediate',
+                        created_at: j.created_at,
+                        status: j.status,
+                        params: {
+                            username: j.username,
+                            bookdate: j.bookdate,
+                            kssj: j.kssj,
+                            jssj: j.jssj,
+                            resources_name: j.resources_name,
+                            target_time_str: j.target_time_str,
+                            num_threads: j.num_threads
+                        }
+                    }));
+
+                // 合并两个列表，按创建时间倒序排序
+                const allJobs = [...memoryJobs, ...dbJobsFormatted]
+                    .sort((a, b) => b.created_at - a.created_at);
+
+                updateStats(allJobs);
+                renderJobs(allJobs);
+
+                document.getElementById('last-update').textContent =
+                    `上次更新: ${new Date().toLocaleTimeString()}`;
+
+            } catch (e) {
+                console.error('fetch error', e);
+                Toast.error('加载失败', e.message);
+            }
+        }
+
+        // ============ 更新统计 ============
+        function updateStats(jobs) {
+            const total = jobs.length;
+            const running = jobs.filter(j => j.alive).length;
+            const done = jobs.filter(j => !j.alive && j.status === 'done').length;
+            const failed = jobs.filter(j => !j.alive && j.status === 'failed').length;
+
+            document.getElementById('stat-total').textContent = total;
+            document.getElementById('stat-running').textContent = running;
+            document.getElementById('stat-done').textContent = done;
+            document.getElementById('stat-failed').textContent = failed;
+        }
+
+        // ============ 渲染任务列表 ============
+        function renderJobs(jobs) {
+            if (jobs.length === 0) {
+                tbody.innerHTML = `
+                    <tr>
+                        <td colspan="6">
+                            <div class="empty-state">
+                                <div class="empty-icon">📭</div>
+                                <div class="empty-text">暂无任务</div>
+                                <div class="empty-subtext">返回预约页面创建新任务</div>
+                            </div>
+                        </td>
+                    </tr>
+                `;
+                return;
+            }
+
+            tbody.innerHTML = jobs.map(job => {
+                const statusClass = job.alive ? 'running' : (job.status || 'done');
+                const statusText = job.alive ? '运行中' : getStatusText(job.status);
+                const createdAt = new Date(job.created_at * 1000).toLocaleString();
+                
+                return `
+                    <tr>
+                        <td><span class="job-id">${job.job_id.substring(0, 8)}...</span></td>
+                        <td>${job.type || '-'}</td>
+                        <td>${createdAt}</td>
+                        <td><span class="status-badge ${statusClass}">${statusText}</span></td>
+                        <td class="params-preview">
+                            <button class="params-btn" onclick="showParams('${encodeURIComponent(JSON.stringify(job.params, null, 2))}')">
+                                查看参数
+                            </button>
+                        </td>
+                        <td>
+                            ${job.alive ? `
+                                <button class="btn btn-danger btn-sm" onclick="stopJob('${job.job_id}')">
+                                    停止
+                                </button>
+                            ` : '-'}
+                        </td>
+                    </tr>
+                `;
+            }).join('');
+        }
+
+        function getStatusText(status) {
+            const map = {
+                'done': '已完成',
+                'failed': '失败',
+                'cancelled': '已取消',
+                'scheduled': '等待中'
+            };
+            return map[status] || status || '已结束';
+        }
+
+        // ============ 显示参数 ============
+        function showParams(encodedParams) {
+            paramsContent.textContent = decodeURIComponent(encodedParams);
+            paramsDialog.showModal();
+        }
+
+        // ============ 停止任务 ============
+        async function stopJob(jobId) {
+            try {
+                const resp = await fetch(`/api/jobs/${jobId}/stop`, {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ current_username: window.__auth?.username || '' })
+                });
+                const data = await resp.json();
+                
+                if (data.ok) {
+                    Toast.success('已停止', '任务停止请求已发送');
+                    fetchJobs();
+                } else {
+                    const msg = data?.data?.message || data.error || '未知错误';
+                    Toast.error('停止失败', msg);
+                }
+            } catch (e) {
+                Toast.error('请求失败', e.message);
+            }
+        }
+
+        // ============ 配置管理 ============
+        const configDialog = document.getElementById('config-dialog');
+        const currentLoginUrlEl = document.getElementById('current-login-url');
+        const newLoginUrlEl = document.getElementById('new-login-url');
+        
+        async function openConfig() {
+            try {
+                // 获取当前配置
+                const resp = await fetch('/api/config');
+                const data = await resp.json();
+                
+                if (data.ok && data.data) {
+                    const currentUrl = data.data.login_url || '';
+                    currentLoginUrlEl.textContent = currentUrl || '未设置';
+                    newLoginUrlEl.value = currentUrl;
+                } else {
+                    currentLoginUrlEl.textContent = '加载失败';
+                }
+                
+                configDialog.showModal();
+            } catch (e) {
+                Toast.error('加载失败', e.message);
+            }
+        }
+        
+        async function saveConfig() {
+            const newUrl = newLoginUrlEl.value.trim();
+            
+            if (!newUrl) {
+                Toast.error('验证失败', '请输入 Login URL');
+                return;
+            }
+            
+            try {
+                const resp = await fetch('/api/config/update', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ login_url: newUrl })
+                });
+                
+                const data = await resp.json();
+                
+                if (data.ok) {
+                    const reloaded = data.data?.reloaded;
+                    if (reloaded) {
+                        Toast.success('保存成功', '配置已更新并自动重载，立即生效');
+                    } else {
+                        Toast.success('保存成功', '配置已更新，但需要重启服务器生效');
+                    }
+                    configDialog.close();
+                } else {
+                    Toast.error('保存失败', data.error || '未知错误');
+                }
+            } catch (e) {
+                Toast.error('请求失败', e.message);
+            }
+        }
+
+        // ============ 事件绑定 ============
+        document.getElementById('themeBtn').addEventListener('click', () => Theme.toggle());
+        document.getElementById('refreshBtn').addEventListener('click', () => {
+            fetchJobs();
+            Toast.info('正在刷新...');
+        });
+        document.getElementById('params-close').addEventListener('click', () => paramsDialog.close());
+        
+        // 配置相关
+        document.getElementById('configBtn').addEventListener('click', openConfig);
+        document.getElementById('config-cancel').addEventListener('click', () => configDialog.close());
+        document.getElementById('config-save').addEventListener('click', saveConfig);
+
+        // ============ 初始化 ============
+        async function init() {
+            Theme.init();
+            
+            // 尝试从缓存加载认证信息
+            const cached = Auth.load();
+            if (cached && cached.username && cached.password) {
+                // 验证是否为授权用户
+                if (cached.username === '202540510004') {
+                    window.__auth = cached;
+                } else {
+                    Auth.clear();
+                }
+            }
+            
+            // 如果没有登录信息，弹出登录框
+            if (!window.__auth) {
+                const ok = await promptLogin();
+                if (!ok) {
+                    document.body.innerHTML = `
+                        <div style="display: flex; align-items: center; justify-content: center; min-height: 100vh; flex-direction: column; gap: 20px; padding: 20px; text-align: center;">
+                            <div style="font-size: 64px;">🔒</div>
+                            <h1 style="font-size: 24px; color: var(--text-primary);">未登录</h1>
+                            <p style="color: var(--text-secondary); max-width: 400px;">
+                                您需要登录才能访问该页面
+                            </p>
+                            <a href="/" style="color: var(--primary); text-decoration: none;">← 返回首页</a>
+                        </div>
+                    `;
+                    return;
+                }
+            }
+            
+            // 验证通过，加载任务列表
+            fetchJobs();
+            setInterval(fetchJobs, 3000);
+        }
+        
+        init();
+    </script>
+</body>
+</html>

@@ -1,0 +1,24 @@
+services:
+  badminton-booking:
+    build: .
+    container_name: badminton-booking
+    restart: unless-stopped
+    ports:
+      - "5000:5000"
+    volumes:
+      # 数据库文件保留在Docker volume中，不同步到本地
+      - badminton-data:/app/data
+      - ./model:/app/model
+      - ./.env:/app/.env:ro
+    environment:
+      - TZ=Asia/Shanghai
+      - PYTHONUNBUFFERED=1
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:5000/health', timeout=5)"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 15s
+
+volumes:
+  badminton-data:
