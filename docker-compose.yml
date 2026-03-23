@@ -1,13 +1,13 @@
 services:
-  badminton-booking:
+  smu-badminton:
     build: .
-    container_name: badminton-booking
+    container_name: smu-badminton
     restart: unless-stopped
     ports:
       - "5000:5000"
     volumes:
       # 数据库文件保留在Docker volume中，不同步到本地
-      - badminton-data:/app/data
+      - smu-badminton-data:/app/data
       - ./model:/app/model
       - ./.env:/app/.env:ro
     environment:
@@ -21,4 +21,4 @@ services:
       start_period: 15s
 
 volumes:
-  badminton-data:
+  smu-badminton-data:

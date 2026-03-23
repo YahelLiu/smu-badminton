@@ -1,4 +1,4 @@
-from fastapi import FastAPI, BackgroundTasks
+﻿from fastapi import FastAPI, BackgroundTasks
 from contextlib import asynccontextmanager
 from pydantic import BaseModel, Field
 import asyncio
@@ -267,13 +267,19 @@ async def _jobs_cleanup():
 
 @app.get("/")
 async def index():
-    # 直接返回前端页面
-    html_path = os.path.join(BASE_DIR, "templates", "book_badminton.html")
+    # 直接返回前端页面（仅 index.html）
+    html_path = os.path.join(BASE_DIR, "templates", "index.html")
     logger.info(f"请求首页，HTML路径: {html_path}, 存在: {os.path.exists(html_path)}")
     if not os.path.exists(html_path):
         logger.error(f"HTML 文件不存在: {html_path}")
-        return {"error": "book_badminton.html not found", "path": html_path, "base_dir": BASE_DIR}
-    return FileResponse(html_path)
+        return {"error": "index.html not found", "path": html_path, "base_dir": BASE_DIR}
+    return FileResponse(html_path, media_type="text/html; charset=utf-8")
+
+@app.get("/favicon.ico")
+async def favicon():
+    # Avoid noisy 404s when browser auto-requests favicon
+    return Response(status_code=204)
+
 
 @app.get("/api/config")
 async def get_config():

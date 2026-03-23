@@ -3,7 +3,7 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>羽毛球场地预约</title>
+    <title>SMU Badminton - Booking</title>
     <style>
         /* CSS 变量 - 主题配色 */
         :root {
@@ -756,7 +756,7 @@
         <header class="header">
             <!-- 标题行 -->
             <div class="header-row header-title-row">
-                <span class="logo">羽毛球场地预约</span>
+                <span class="logo">SMU Badminton</span>
                 <button class="btn btn-icon btn-outline" id="themeBtn" title="切换主题">
                     🌙
                 </button>
@@ -778,6 +778,10 @@
                     <button class="btn btn-outline" id="refreshBtn" title="刷新数据">
                         🔄 刷新
                     </button>
+                    <div class="form-group">
+                        <label class="form-label" for="current-username">学号</label>
+                        <span id="current-username" style="display:inline-block;min-width:120px;padding:8px 10px;border:1px solid var(--border);border-radius:var(--radius);background:var(--bg-primary);font-size:13px;text-align:center;">Not logged in</span>
+                    </div>
 
                     <button class="btn btn-outline" id="logoutBtn">
                         退出登录
@@ -1121,8 +1125,14 @@
             dialogTitle: document.getElementById('dialog-title'),
             dialogInfo: document.getElementById('dialog-info'),
             statusText: document.getElementById('status-text'),
-            lastUpdate: document.getElementById('last-update')
+            lastUpdate: document.getElementById('last-update'),
+            currentUsername: document.getElementById('current-username')
         };
+
+        function renderCurrentUsername() {
+            if (!Elements.currentUsername) return;
+            Elements.currentUsername.textContent = window.__auth?.username || 'Not logged in';
+        }
 
         // ============ 初始化表格 ============
         function initTable() {
@@ -1209,6 +1219,7 @@
                         Toast.error('登录失败', '账号或密码错误，请重新登录');
                         Auth.clear();
                         window.__auth = null;
+                        renderCurrentUsername();
                         AvailabilityCache.clear();
                         
                         // 弹出登录框
@@ -1338,6 +1349,7 @@
                     }
                     window.__auth = { username: u, password: p };
                     Auth.save(window.__auth);
+                    renderCurrentUsername();
                     dlg.close();
                     resolve(true);
                 };
@@ -1475,6 +1487,7 @@
                             Toast.error('登录失败', '账号或密码错误，请重新登录');
                             Auth.clear();
                             window.__auth = null;
+                            renderCurrentUsername();
                             AvailabilityCache.clear();
                             const ok = await promptLogin();
                             if (ok) {
@@ -1566,6 +1579,7 @@
                 // 清除前端缓存
                 Auth.clear();
                 window.__auth = null;
+                renderCurrentUsername();
                 AvailabilityCache.clear();
                 document.querySelectorAll('.hour-cell').forEach(cell => {
                     cell.className = 'hour-cell';
@@ -1623,6 +1637,7 @@
                 }
             }
 
+            renderCurrentUsername();
             await fetchAndRenderBookings();
             Toast.success('加载完成', '数据已更新');
 

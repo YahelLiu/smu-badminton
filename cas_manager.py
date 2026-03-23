@@ -26,6 +26,7 @@ from core_utils import (
     retry_on_error,
     BookingError,
     JobNotFoundError,
+    success_response,
 )
 
 # 配置日志
@@ -95,10 +96,8 @@ class BookingManager:
         with self._lock:
             job = self._jobs.get(job_id)
         
-        # 先从DB取参数，以便后续清理本地预约记录
-        job_row = None
-        if delete_local_booking:
-            job_row = self._get_job_row(job_id)  # 装饰器会处理异常
+        # 先从DB取参数，以便后续清理本地预约记录，并用于判断任务是否存在
+        job_row = self._get_job_row(job_id)
         
         if job:
             job.cancel_event.set()
@@ -121,11 +120,8 @@ class BookingManager:
                 resources_name=job_row.get("resources_name", ""),
             )
         
-        # 删除任务持久化记录
-        self._delete_job_row(job_id)
-        
         logger.info(f"任务已停止: {job_id}")
-        return bool(job)
+        return bool(job) or bool(job_row)
 
     def _register(self, thread: threading.Thread, cancel_event: threading.Event, meta: Dict[str, Any]) -> str:
         job_id = uuid.uuid4().hex
@@ -190,18 +186,16 @@ class BookingManager:
         logger.debug(f"本地预约记录已删除: {username} - {bookdate} {kssj}-{jssj}")
 
     @db_operation
-    def _delete_scheduled_by_params(self, *, username: str, bookdate: str, kssj: str, jssj: str, resources_name: str) -> int:
-        """根据参数删除定时任务"""
+    def _cancel_scheduled_by_params(self, *, username: str, bookdate: str, kssj: str, jssj: str, resources_name: str) -> int:
+        """根据参数将仍在等待/运行中的任务标记为 cancelled"""
         with self._db_pool.get_connection() as conn:
             cur = conn.execute(
-                "SELECT job_id FROM scheduled_jobs WHERE username=? AND bookdate=? AND kssj=? AND jssj=? AND resources_name=?",
+                "UPDATE scheduled_jobs SET status='cancelled' WHERE username=? AND bookdate=? AND kssj=? AND jssj=? AND resources_name=? AND status IN ('scheduled','waiting','running')",
                 (username, bookdate, kssj, jssj, resources_name),
             )
-            rows = [r[0] for r in cur.fetchall()]
-            if rows:
-                conn.executemany("DELETE FROM scheduled_jobs WHERE job_id=?", [(jid,) for jid in rows])
-            logger.debug(f"删除了 {len(rows)} 条定时任务记录")
-            return len(rows)
+            affected = cur.rowcount if cur.rowcount is not None else 0
+            logger.debug(f"按参数标记 cancelled: {affected} 条任务记录")
+            return affected
 
     @handle_errors(default_return=0, log_error=True, error_message="按参数停止任务失败")
     def stop_by_params(self, *, username: str, bookdate: str, kssj: str, jssj: str, resources_name: str) -> int:
@@ -210,7 +204,7 @@ class BookingManager:
         
         流程：
         1. 停止内存中的活跃任务
-        2. 删除数据库中的定时任务记录
+        2. 将数据库中的对应任务标记为 cancelled（保留历史记录）
         3. 删除本地预约记录（统一删除一次）
         
         Returns:
@@ -230,15 +224,15 @@ class BookingManager:
             if self.stop_job(jid, delete_local_booking=False):
                 stopped += 1
         
-        # 2. 删除数据库中的定时任务记录
-        deleted = self._delete_scheduled_by_params(
+        # 2. 将数据库中的对应任务标记为 cancelled（仅处理仍在等待/运行中的任务）
+        cancelled = self._cancel_scheduled_by_params(
             username=username, 
             bookdate=bookdate, 
             kssj=kssj, 
             jssj=jssj, 
             resources_name=resources_name
         )
-        stopped += deleted
+        stopped += cancelled
         
         # 3. 删除本地预约记录（统一删除一次）
         self._delete_local_booking(
@@ -409,16 +403,12 @@ class BookingManager:
         if resume_job_id is None:
             # 1) 先查DB（包含跨进程持久化）
             try:
-                with self._db_lock:
-                    conn = self._db_connect()
-                    try:
-                        cur = conn.execute(
-                            "SELECT job_id FROM scheduled_jobs WHERE username=? AND bookdate=? AND kssj=? AND jssj=? AND resources_name=? AND status IN ('scheduled','waiting','running')",
-                            (username, bookdate, kssj, jssj, resources_name),
-                        )
-                        row = cur.fetchone()
-                    finally:
-                        conn.close()
+                with self._db_pool.get_connection(auto_commit=False) as conn:
+                    cur = conn.execute(
+                        "SELECT job_id FROM scheduled_jobs WHERE username=? AND bookdate=? AND kssj=? AND jssj=? AND resources_name=? AND status IN ('scheduled','waiting','running')",
+                        (username, bookdate, kssj, jssj, resources_name),
+                    )
+                    row = cur.fetchone()
                 if row and row[0]:
                     return row[0]
             except Exception:
@@ -650,7 +640,7 @@ def book_badminton_slot(
 
     resource_id, time_id = result
     resp_json = make_appointment(access_token, time_id, resource_id, bookdate, kssj, jssj)
-    return {"ok": True, "data": resp_json}
+    return success_response(resp_json)
 
 
 def schedule_booking(
@@ -751,7 +741,7 @@ def schedule_booking(
     for t in threads:
         t.join()
 
-    return {"ok": True, "data": {"threads": num_threads, "results": results}}
+    return success_response({"threads": num_threads, "results": results})
 
 
 
