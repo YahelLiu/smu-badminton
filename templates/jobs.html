@@ -5,36 +5,44 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>SMU Badminton - Jobs</title>
     <style>
-        /* CSS 变量 - 主题配色 */
+        /* CSS 变量 - 主题配色 (SaaS风格优化) */
         :root {
-            --primary: #3B82F6;
-            --primary-hover: #2563EB;
+            --primary: #2563EB;
+            --primary-hover: #1D4ED8;
             --success: #10B981;
             --danger: #EF4444;
+            --danger-hover: #DC2626;
             --warning: #F59E0B;
-            --bg-primary: #F3F4F6;
+            --bg-primary: #F8FAFC;
             --bg-secondary: #FFFFFF;
-            --text-primary: #1F2937;
-            --text-secondary: #6B7280;
-            --border: #E5E7EB;
-            --shadow: rgba(0, 0, 0, 0.1);
-            --radius: 8px;
-            --transition: all 0.2s ease;
+            --bg-hover: #F1F5F9;
+            --text-primary: #0F172A;
+            --text-secondary: #64748B;
+            --text-muted: #94A3B8;
+            --border: #E2E8F0;
+            --border-focus: #93C5FD;
+            --shadow: 0 1px 2px 0 rgb(0 0 0 / 0.05);
+            --shadow-md: 0 4px 6px -1px rgb(0 0 0 / 0.05), 0 2px 4px -2px rgb(0 0 0 / 0.05);
+            --shadow-lg: 0 10px 15px -3px rgb(0 0 0 / 0.1), 0 4px 6px -4px rgb(0 0 0 / 0.1);
+            --radius: 12px;
+            --radius-btn: 8px;
+            --transition: all 0.2s cubic-bezier(0.4, 0, 0.2, 1);
         }
 
         /* 暗色主题 */
         [data-theme="dark"] {
-            --primary: #60A5FA;
-            --primary-hover: #3B82F6;
-            --success: #34D399;
-            --danger: #F87171;
-            --warning: #FBBF24;
-            --bg-primary: #111827;
-            --bg-secondary: #1F2937;
-            --text-primary: #F9FAFB;
-            --text-secondary: #9CA3AF;
-            --border: #374151;
-            --shadow: rgba(0, 0, 0, 0.3);
+            --primary: #3B82F6;
+            --primary-hover: #60A5FA;
+            --bg-primary: #0F172A;
+            --bg-secondary: #1E293B;
+            --bg-hover: #334155;
+            --text-primary: #F8FAFC;
+            --text-secondary: #94A3B8;
+            --border: #334155;
+            --border-focus: #3B82F6;
+            --shadow: 0 1px 2px 0 rgb(0 0 0 / 0.3);
+            --shadow-md: 0 4px 6px -1px rgb(0 0 0 / 0.4);
+            --shadow-lg: 0 10px 15px -3px rgb(0 0 0 / 0.5);
         }
 
         * {
@@ -44,20 +52,22 @@
         }
 
         body {
-            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', 'PingFang SC', 'Hiragino Sans GB', 'Microsoft YaHei', 'Helvetica Neue', Arial, sans-serif;
+            font-family: 'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', 'PingFang SC', 'Hiragino Sans GB', 'Microsoft YaHei', 'Helvetica Neue', Arial, sans-serif;
             background: var(--bg-primary);
             color: var(--text-primary);
             min-height: 100vh;
-            transition: var(--transition);
+            transition: background var(--transition), color var(--transition);
             font-size: 14px;
-            line-height: 1.5;
+            line-height: 1.6;
+            -webkit-font-smoothing: antialiased;
+            -moz-osx-font-smoothing: grayscale;
         }
 
         /* 容器 */
         .container {
             max-width: 1200px;
             margin: 0 auto;
-            padding: 24px;
+            padding: 32px 24px;
         }
 
         /* 头部 */
@@ -65,11 +75,17 @@
             display: flex;
             justify-content: space-between;
             align-items: center;
-            margin-bottom: 24px;
-            padding: 20px 24px;
+            margin-bottom: 32px;
+            padding: 24px 32px;
             background: var(--bg-secondary);
             border-radius: var(--radius);
-            box-shadow: 0 1px 3px var(--shadow);
+            box-shadow: var(--shadow-md);
+            border: 1px solid var(--border);
+            transition: box-shadow var(--transition);
+        }
+
+        .header:hover {
+            box-shadow: var(--shadow-lg);
         }
 
         .header-left {
@@ -79,14 +95,18 @@
         }
 
         .logo {
-            font-size: 22px;
-            font-weight: 700;
-            color: var(--primary);
+            font-size: 24px;
+            font-weight: 800;
+            color: var(--text-primary);
+            letter-spacing: -0.5px;
+            display: flex;
+            align-items: center;
         }
 
         .logo::before {
             content: "📋";
-            margin-right: 8px;
+            font-size: 28px;
+            margin-right: 12px;
         }
 
         .back-link {
@@ -96,14 +116,15 @@
             color: var(--text-secondary);
             text-decoration: none;
             font-size: 14px;
+            font-weight: 500;
             padding: 8px 12px;
-            border-radius: var(--radius);
-            transition: var(--transition);
+            border-radius: var(--radius-btn);
+            transition: background var(--transition), color var(--transition);
         }
 
         .back-link:hover {
-            background: var(--bg-primary);
-            color: var(--primary);
+            background: var(--bg-hover);
+            color: var(--text-primary);
         }
 
         .header-right {
@@ -117,95 +138,123 @@
             display: inline-flex;
             align-items: center;
             justify-content: center;
-            gap: 6px;
-            padding: 8px 16px;
+            gap: 8px;
+            padding: 10px 20px;
             border: none;
-            border-radius: var(--radius);
+            border-radius: var(--radius-btn);
             font-size: 14px;
-            font-weight: 500;
+            font-weight: 600;
             cursor: pointer;
-            transition: var(--transition);
+            transition: all var(--transition);
+            user-select: none;
+        }
+
+        .btn:active {
+            transform: scale(0.96);
         }
 
         .btn-primary {
             background: var(--primary);
-            color: white;
+            color: #FFFFFF;
+            box-shadow: 0 1px 2px rgba(37, 99, 235, 0.3);
         }
 
         .btn-primary:hover {
             background: var(--primary-hover);
+            box-shadow: 0 4px 12px rgba(37, 99, 235, 0.25);
+            transform: translateY(-1px);
         }
 
         .btn-danger {
             background: var(--danger);
-            color: white;
+            color: #FFFFFF;
+            box-shadow: 0 1px 2px rgba(239, 68, 68, 0.3);
         }
 
         .btn-danger:hover {
-            background: #DC2626;
+            background: var(--danger-hover);
+            box-shadow: 0 4px 12px rgba(239, 68, 68, 0.25);
+            transform: translateY(-1px);
         }
 
         .btn-outline {
             background: transparent;
             border: 1px solid var(--border);
             color: var(--text-primary);
+            box-shadow: var(--shadow);
         }
 
         .btn-outline:hover {
-            background: var(--bg-primary);
-            border-color: var(--primary);
+            background: var(--bg-hover);
+            border-color: var(--text-muted);
         }
 
         .btn-icon {
-            width: 36px;
-            height: 36px;
+            width: 38px;
+            height: 38px;
             padding: 0;
             border-radius: 50%;
+            display: inline-flex;
+            align-items: center;
+            justify-content: center;
         }
 
         .btn-sm {
-            padding: 6px 12px;
+            padding: 8px 14px;
             font-size: 13px;
+            border-radius: 6px;
         }
 
-        /* 统计卡片 */
+        /* 统计卡片 (高级排版) */
         .stats {
             display: grid;
             grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
-            gap: 16px;
-            margin-bottom: 24px;
+            gap: 20px;
+            margin-bottom: 32px;
         }
 
         .stat-card {
             background: var(--bg-secondary);
-            padding: 20px;
+            padding: 24px;
             border-radius: var(--radius);
-            box-shadow: 0 1px 3px var(--shadow);
+            box-shadow: var(--shadow-md);
+            border: 1px solid var(--border);
+            display: flex;
+            flex-direction: column;
+            gap: 8px;
+            transition: all var(--transition);
+        }
+
+        .stat-card:hover {
+            box-shadow: var(--shadow-lg);
+            transform: translateY(-2px);
         }
 
         .stat-value {
-            font-size: 32px;
-            font-weight: 700;
-            color: var(--primary);
-            margin-bottom: 4px;
+            font-size: 36px;
+            font-weight: 800;
+            color: var(--text-primary);
+            line-height: 1;
+            letter-spacing: -1px;
         }
 
         .stat-label {
             font-size: 14px;
+            font-weight: 600;
             color: var(--text-secondary);
+            text-transform: uppercase;
+            letter-spacing: 0.5px;
         }
 
-        .stat-card.success .stat-value {
-            color: var(--success);
-        }
-
-        .stat-card.warning .stat-value {
-            color: var(--warning);
-        }
-
-        .stat-card.danger .stat-value {
-            color: var(--danger);
-        }
+        /* 给统计卡片加上微妙的主题色边框提示 */
+        .stat-card.warning { border-bottom: 3px solid var(--warning); }
+        .stat-card.warning .stat-value { color: var(--warning); }
+        
+        .stat-card.success { border-bottom: 3px solid var(--primary); } /* 完成用品牌蓝更搭 */
+        .stat-card.success .stat-value { color: var(--primary); }
+        
+        .stat-card.danger { border-bottom: 3px solid var(--danger); }
+        .stat-card.danger .stat-value { color: var(--danger); }
 
         /* 主内容 */
         .main-content {
@@ -228,89 +277,95 @@
             font-weight: 600;
         }
 
-        /* 表格 */
+        /* 表格样式 (现代化) */
         .table-container {
             overflow-x: auto;
+            border-top: 1px solid var(--border);
         }
 
         .jobs-table {
             width: 100%;
-            border-collapse: collapse;
-        }
-
-        .jobs-table th,
-        .jobs-table td {
-            padding: 14px 16px;
+            border-collapse: separate;
+            border-spacing: 0;
             text-align: left;
-            border-bottom: 1px solid var(--border);
-        }
-
-        .jobs-table th {
-            background: var(--bg-primary);
-            font-size: 13px;
-            font-weight: 600;
-            color: var(--text-secondary);
-            text-transform: uppercase;
-            letter-spacing: 0.5px;
-        }
-
-        .jobs-table tr:hover {
-            background: var(--bg-primary);
-        }
-
-        .jobs-table td {
             font-size: 14px;
         }
 
-        /* Job ID */
-        .job-id {
-            font-family: 'Monaco', 'Menlo', monospace;
-            font-size: 12px;
+        .jobs-table th {
+            background-color: var(--bg-hover);
             color: var(--text-secondary);
-            background: var(--bg-primary);
-            padding: 4px 8px;
-            border-radius: 4px;
+            font-weight: 600;
+            padding: 16px;
+            border-bottom: 2px solid var(--border-focus);
+            white-space: nowrap;
+            letter-spacing: 0.5px;
+            position: sticky;
+            top: 0;
+            z-index: 10;
         }
 
-        /* 状态徽章 */
+        .jobs-table td {
+            padding: 16px;
+            color: var(--text-primary);
+            border-bottom: 1px solid var(--border);
+            font-variant-numeric: tabular-nums;
+            vertical-align: middle;
+        }
+
+        .jobs-table tr:last-child td {
+            border-bottom: none;
+        }
+
+        .jobs-table tr {
+            transition: background var(--transition);
+        }
+
+        .jobs-table tr:hover td {
+            background-color: var(--bg-hover);
+        }
+
+        /* Job ID (打磨为标签样式) */
+        .job-id {
+            font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+            font-size: 13px;
+            color: var(--text-primary);
+            background: var(--bg-body);
+            padding: 4px 8px;
+            border-radius: 6px;
+            border: 1px solid var(--border);
+            letter-spacing: 0.5px;
+        }
+
+        /* 状态徽章 (极简带呼吸灯动画) */
         .status-badge {
             display: inline-flex;
             align-items: center;
             gap: 6px;
-            padding: 4px 10px;
-            border-radius: 20px;
-            font-size: 12px;
-            font-weight: 500;
+            padding: 4px 12px;
+            border-radius: 9999px; /* 完全圆角 */
+            font-size: 13px;
+            font-weight: 600;
+            box-shadow: 0 1px 2px rgba(0,0,0,0.05); /* 增加一点立体感 */
         }
 
-        .status-badge.running {
-            background: rgba(59, 130, 246, 0.1);
-            color: var(--primary);
-        }
-
+        .status-badge.running { background-color: rgba(59, 130, 246, 0.15); color: #2563eb; border: 1px solid rgba(59, 130, 246, 0.3); }
         .status-badge.running::before {
             content: '';
             width: 8px;
             height: 8px;
-            background: var(--primary);
+            background: #2563eb;
             border-radius: 50%;
-            animation: pulse 1.5s infinite;
+            animation: pulse 2s infinite;
         }
 
-        .status-badge.done {
-            background: rgba(16, 185, 129, 0.1);
-            color: var(--success);
-        }
+        .status-badge.done { background-color: rgba(16, 185, 129, 0.15); color: #059669; border: 1px solid rgba(16, 185, 129, 0.3); }
+        .status-badge.done::before { content: ''; width: 8px; height: 8px; background: #059669; border-radius: 50%; }
 
-        .status-badge.failed {
-            background: rgba(239, 68, 68, 0.1);
-            color: var(--danger);
-        }
+        .status-badge.failed { background-color: rgba(239, 68, 68, 0.15); color: #dc2626; border: 1px solid rgba(239, 68, 68, 0.3); }
+        .status-badge.failed::before { content: ''; width: 8px; height: 8px; background: #dc2626; border-radius: 50%; }
 
-        .status-badge.scheduled {
-            background: rgba(245, 158, 11, 0.1);
-            color: var(--warning);
-        }
+        .status-badge.scheduled { background-color: rgba(245, 158, 11, 0.15); color: #d97706; border: 1px solid rgba(245, 158, 11, 0.3); }
+        .status-badge.scheduled::before { content: ''; width: 8px; height: 8px; background: #d97706; border-radius: 50%; }
 
         @keyframes pulse {
             0%, 100% { opacity: 1; }
@@ -488,7 +543,7 @@
         <!-- 头部 -->
         <header class="header">
             <div class="header-left">
-                <span class="logo">SMU Badminton Jobs</span>
+                <span class="logo">SMU 羽毛球 Jobs</span>
                 <a href="/" class="back-link">← 返回预约页面</a>
             </div>
             <div class="header-right">

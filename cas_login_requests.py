@@ -37,7 +37,7 @@ _TOKEN_PROFILE_TTL_SEC = int(os.getenv("TOKEN_PROFILE_TTL_SEC", "3600"))
 
 
 def _decode_jwt_payload(token: str) -> Dict[str, Any] | None:
-    """Decode JWT payload without verifying signature."""
+    """解析 JWT payload（不校验签名）。"""
     try:
         parts = token.split(".")
         if len(parts) < 2:
@@ -167,24 +167,24 @@ def _absolute_url(base_url: str, maybe_relative: str) -> str:
 
 
 def _resolve_cas_login_url(session: requests.Session, login_url: str | None, timeout: int = 20) -> str:
-    """Resolve CAS login URL by following WF -> SSO redirects."""
+    """沿着 WF -> SSO 重定向链解析 CAS 登录 URL。"""
     start = (login_url or "").strip()
     lower_start = start.lower()
 
-    # direct CAS login URL
+    # 直接就是 CAS 登录地址
     if "cas.shmtu.edu.cn/cas/login" in lower_start:
         return start
 
-    # already an oauth2 authorize URL
+    # 已经是 oauth2 authorize 地址
     if "/sso/oauth2/authorize" in lower_start:
         pass
-    # already sso login URL
+    # 已经是 sso 登录地址
     elif "/sso/login" in lower_start:
         pass
-    # yy-sys or other wf pages: rebuild authorize url with retUrl
+    # yy-sys 或其他 wf 页面：基于 retUrl 重建 authorize 地址
     elif start and lower_start.startswith(WF_ORIGIN.lower()):
         start = _build_wf_authorize_url(ret_url=start)
-    # empty/invalid input fallback
+    # 输入为空或无效时兜底
     else:
         start = _build_wf_authorize_url(ret_url=WF_HOME_URL)
 
@@ -209,7 +209,7 @@ def _resolve_cas_login_url(session: requests.Session, login_url: str | None, tim
 
 
 def get_user_info_from_appointment(token):
-    """Try to infer user profile from existing appointment records."""
+    """尝试从已有预约记录中推断用户信息。"""
     headers = {
         "Authorization": f"Bearer {token}",
         "Content-Type": "application/json",
@@ -293,7 +293,7 @@ def get_user_info_from_appointment(token):
 
 
 def resolve_user_info(token: str) -> Dict[str, Any] | None:
-    """Resolve appointment user info from API first, then from JWT claims."""
+    """先从 API 获取预约用户信息，失败再回退到 JWT claims。"""
     user_info = get_user_info_from_appointment(token)
     if user_info:
         return user_info
@@ -306,13 +306,13 @@ def resolve_user_info(token: str) -> Dict[str, Any] | None:
 
 
 def get_captcha_and_params(login_url, captcha_url):
-    """Resolve CAS login URL from WF flow, then fetch captcha/execution."""
+    """从 WF 流程解析 CAS 登录地址，并获取验证码与 execution。"""
     session = requests.Session()
     captcha_url = (captcha_url or CAS_CAPTCHA_URL).strip()
 
     cas_login_url = _resolve_cas_login_url(session, login_url, timeout=20)
 
-    # 1. fetch CAS login page and parse hidden params
+    # 1) 拉取 CAS 登录页并解析隐藏参数
     resp = session.get(cas_login_url, timeout=20)
     tree = html.fromstring(resp.text)
 
@@ -323,7 +323,7 @@ def get_captcha_and_params(login_url, captcha_url):
         raise RuntimeError("execution not found on CAS login page")
     execution_value = execution_candidates[0]
 
-    # 2. download captcha and OCR in memory
+    # 2) 下载验证码并在内存中 OCR
     captcha_response = session.get(captcha_url, timeout=15)
     result, *_ = predict_validate_code(captcha_response.content)
 
@@ -331,7 +331,7 @@ def get_captcha_and_params(login_url, captcha_url):
 
 
 def cas_login(login_url, captcha_url, username, password):
-    """Login via WF->SSO->CAS redirect chain and get OIDC tokens."""
+    """通过 WF->SSO->CAS 重定向链登录并获取 OIDC token。"""
     session, cas_login_url, execution_value, captcha = get_captcha_and_params(login_url, captcha_url)
 
     data = {
@@ -369,7 +369,7 @@ def cas_login(login_url, captcha_url, username, password):
 
 
 def follow_redirects(session, start_url):
-    """Follow redirect chain and return final URL and response body."""
+    """沿重定向链跟随并返回最终 URL 与响应体。"""
     current_url = start_url
     max_redirects = 10
     redirect_count = 0
@@ -386,10 +386,10 @@ def follow_redirects(session, start_url):
 
 
 def extract_oidc_tokens(url):
-    """Extract OIDC tokens from URL fragment or query parameters."""
+    """从 URL 的 fragment 或 query 参数中提取 OIDC token。"""
     parsed_url = urlparse(url)
     
-    # 妫€鏌RL fragment涓槸鍚﹀寘鍚玹oken
+    # 检查 URL fragment 是否包含 token
     if parsed_url.fragment:
         fragment_params = parse_qs(parsed_url.fragment)
         
@@ -401,7 +401,7 @@ def extract_oidc_tokens(url):
         
         return tokens
     
-    # 妫€鏌RL query鍙傛暟涓槸鍚﹀寘鍚玹oken
+    # 检查 URL query 参数是否包含 token
     query_params = parse_qs(parsed_url.query)
     tokens = {}
     if 'access_token' in query_params:
@@ -440,7 +440,7 @@ def requests_get_with_retry(url, max_retries=10, retry_interval=1):
     return None
 
 def find_time_slots_by_resource(token, resources_id, date_ms):
-    """Query a resource's timeslots and available count by date timestamp."""
+    """按日期时间戳查询资源时段及可预约数量。"""
     url = WF_API_URL
     headers = {
         "Authorization": f"Bearer {token}",
@@ -463,8 +463,8 @@ def find_time_slots_by_resource(token, resources_id, date_ms):
 
 def list_resources_by_account(token, bookdate, type_id=None):
     """
-    鍩轰簬 findResourcesAllByAccount 鑾峰彇鎸囧畾鏃ユ湡鐨勮祫婧愬垪琛紙鍖呭惈鏃堕棿娈碉級銆?
-    杩斿洖 JSON 鏁版嵁缁撴瀯涓殑 resources 鍒楄〃锛屽け璐ヨ繑鍥?None銆?
+    基于 findResourcesAllByAccount 获取指定日期的资源列表（包含时间段）。
+    返回 JSON 数据结构中的 resources 列表，失败返回 None。
     """
     if type_id is None:
         type_id = BADMINTON_TYPE_ID
@@ -496,8 +496,8 @@ def list_resources_by_account(token, bookdate, type_id=None):
 
 def check_resource_availability_on_date(token, resources_id, bookdate):
     """
-    鏌ヨ鏌愪釜璧勬簮鍦ㄦ寚瀹氭棩鏈熺殑鎵€鏈夋椂闂存鏄惁鍙绾︺€?
-    杩斿洖鍒楄〃: [{kssj, jssj, canAppointmentNumber}]
+    检查某个资源在指定日期的所有时间段是否可约。
+    返回列表: [{kssj, jssj, canAppointmentNumber}]
     """
     from datetime import datetime
     dt = datetime.strptime(bookdate, "%Y-%m-%d")
@@ -516,7 +516,7 @@ def check_resource_availability_on_date(token, resources_id, bookdate):
     return results
 
 def find_resources_id_by_name(token, bookdate, resources_name):
-    """Find resource id by display name on a specific date."""
+    """按显示名称查找指定日期的资源 ID。"""
     resources = list_resources_by_account(token, bookdate)
     if not resources:
         return None
@@ -527,9 +527,9 @@ def find_resources_id_by_name(token, bookdate, resources_name):
 
 def demo_check_availability(token, bookdate, resources_name=None):
     """
-    娴嬭瘯绋嬪簭锛?
-    - 鑻ユ彁渚?resources_name锛氭煡璇㈠叾璧勬簮ID骞惰緭鍑鸿璧勬簮褰撳ぉ鎵€鏈夋椂闂存鍙绾︽暟閲?
-    - 鑻ヤ笉鎻愪緵锛氳緭鍑哄綋澶╂墍鏈夎祫婧愬強鍏舵瘡涓椂闂存鐨勫彲棰勭害鏁伴噺
+    测试程序：
+    - 若提供 resources_name：查询其资源 ID，并输出该资源当天所有时间段可预约数量
+    - 若不提供：输出当天所有资源及其每个时间段的可预约数量
     """
     if resources_name:
         resources_id = find_resources_id_by_name(token, bookdate, resources_name)
@@ -543,7 +543,7 @@ def demo_check_availability(token, bookdate, resources_name=None):
     else:
         resources = list_resources_by_account(token, bookdate)
         if not resources:
-            print("鏈幏鍙栧埌璧勬簮鍒楄〃")
+            print("未获取到资源列表")
             return
         for r in resources:
             rid = r.get('id')
@@ -555,10 +555,10 @@ def demo_check_availability(token, bookdate, resources_name=None):
 
 def list_appointments_for_account(token, bookdate):
     """
-    鎷夊彇褰撳墠璐︽埛鍦ㄦ寚瀹氭棩鏈熺殑棰勭害璁板綍锛岃繑鍥?edges 鍒楄〃銆?
+    拉取当前账户在指定日期的预约记录，返回 edges 列表。
     """
     from datetime import datetime
-    # 灏?YYYY-MM-DD 杞崲涓哄綋澶?00:00:00 鐨勬绉掓椂闂存埑浠ヤ究瀵规瘮
+    # 将 YYYY-MM-DD 转为当天 00:00:00 的毫秒时间戳以便对比
     dt = datetime.strptime(bookdate, "%Y-%m-%d")
     bookdate_ms = int(dt.timestamp() * 1000)
 
@@ -586,12 +586,12 @@ def list_appointments_for_account(token, bookdate):
         return []
     data = resp.json()
     edges = data.get('data', {}).get('findAppointmentInformationAllForAccount', {}).get('edges', [])
-    # 杩囨护鍚屼竴澶╃殑棰勭害锛坅ppointment_date 涓烘绉掞級
+    # 过滤同一天的预约（appointment_date 为毫秒）
     same_day = [e for e in edges if abs(int(e.get('node', {}).get('appointment_date', 0)) - bookdate_ms) < 24*60*60*1000]
     return same_day
 
 def compute_availability_for_date(token, bookdate):
-    # 骞惰鑾峰彇璧勬簮鍒楄〃鍜岀敤鎴烽绾﹁褰?
+    # 并发获取资源列表和用户预约记录
     with ThreadPoolExecutor(max_workers=2) as init_executor:
         resources_future = init_executor.submit(list_resources_by_account, token, bookdate)
         appointments_future = init_executor.submit(list_appointments_for_account, token, bookdate)
@@ -612,7 +612,7 @@ def compute_availability_for_date(token, bookdate):
 
     rid_list = [(r.get('id'), r.get('resources_name')) for r in resources]
     results_map = {}
-    # 澧炲姞骞跺彂鏁板埌15锛屾墍鏈夊満鍦板悓鏃惰姹?
+    # 并发数最多到 15，所有场地同时查询
     max_workers = max(1, min(15, len(rid_list)))
     with ThreadPoolExecutor(max_workers=max_workers) as executor:
         future_map = {executor.submit(find_time_slots_by_resource, token, rid, date_ms): (rid, rname) for rid, rname in rid_list}
@@ -669,7 +669,7 @@ def fetch_resource_time_id(token, bookdate, resources_name, kssj, jssj):
 
     json_data = response.json()
     if 'data' not in json_data or 'findResourcesAllByAccount' not in json_data['data']:
-        print("杩斿洖鏁版嵁鏍煎紡寮傚父鎴栨棤璧勬簮鏁版嵁")
+        print("返回数据格式异常或无资源数据")
         return None
 
     resources = json_data['data']['findResourcesAllByAccount']
@@ -679,7 +679,7 @@ def fetch_resource_time_id(token, bookdate, resources_name, kssj, jssj):
             for time_slot in resource.get('resourcesTimeSlot', []):
                 if time_slot.get('kssj') == kssj and time_slot.get('jssj') == jssj:
                     time_id = time_slot.get('id')
-                    print("鑾峰緱棰勭害鍒楄〃鍐呭")
+                    print("获取到预约时段信息")
                     return resource_id, time_id
     return None
 
@@ -805,30 +805,31 @@ def get_network_time():
         timestamp_ms = int(json_data['data'])
         timestamp_s = timestamp_ms / 1000
         dt_utc = datetime.fromtimestamp(timestamp_s, tz=timezone.utc)
-        dt_local = dt_utc.astimezone(timezone(timedelta(hours=8)))  # 鍋囪涓滃叓鍖?
+        dt_local = dt_utc.astimezone(timezone(timedelta(hours=8)))  # 假设东八区
         return dt_local
     except Exception as e:
-        print("鑾峰彇缃戠粶鏃堕棿澶辫触:", e)
+        print("获取网络时间失败:", e)
         return None
 
 def get_target_datetime_from_network(target_time_str, bookdate=None):
     """
-    璁＄畻鐩爣鎶㈢エ鏃堕棿銆?
-    
-    濡傛灉鎻愪緵浜?bookdate锛堥绾︽棩鏈燂級锛屽垯鐩爣鏃堕棿涓?bookdate - 7澶?+ target_time_str銆?
-    渚嬪锛氶绾?2025-12-18锛宼arget_time_str='21:00:00'锛屽垯鐩爣鏃堕棿涓?2025-12-11 21:00:00銆?
-    
-    濡傛灉鏈彁渚?bookdate锛屽垯浣跨敤褰撳墠缃戠粶鏃ユ湡 + target_time_str锛堝吋瀹规棫閫昏緫锛夈€?
+    计算目标抢票时间。
+
+    如果提供了 bookdate（预约日期），则目标时间为 bookdate - 7 天 + target_time_str。
+    例如：预约 2025-12-18，target_time_str='21:00:00'，
+    则目标时间为 2025-12-11 21:00:00。
+
+    如果未提供 bookdate，则使用当前网络日期 + target_time_str（兼容旧逻辑）。
     """
     beijing_tz = timezone(timedelta(hours=8))
     
     if bookdate:
-        # 棰勭害鏃ユ湡鍓?澶╃殑鎸囧畾鏃堕棿
+        # 预约日期前 7 天的指定时间
         book_date_obj = datetime.strptime(bookdate, "%Y-%m-%d")
         target_date = book_date_obj - timedelta(days=7)
         target_date_str = target_date.strftime("%Y-%m-%d")
     else:
-        # 鍏煎鏃ч€昏緫锛氫娇鐢ㄥ綋鍓嶇綉缁滄棩鏈?
+        # 兼容旧逻辑：使用当前网络日期
         now = None
         while now is None:
             now = get_network_time()
@@ -890,7 +891,7 @@ def get_token_cached(login_url, captcha_url, username, password, ttl_seconds=900
 
 
 def clear_token_cache(username: str = None):
-    """Clear token cache. If username is provided, clear only that user."""
+    """清理 token 缓存；若指定 username，仅清理该用户。"""
     with _TOKEN_LOCK:
         if username:
             entry = _TOKEN_CACHE.pop(username, None)
@@ -901,13 +902,13 @@ def clear_token_cache(username: str = None):
             _TOKEN_PROFILE_CACHE.clear()
 
 
-# 绾跨▼鏁帮紝寮哄埗涓?锛岄伩鍏嶅悓涓€璧勬簮鏃舵澶氬苟鍙?
+# 线程数，固定为 5，避免同一资源时段过多并发
 num_threads = 5
 barrier = threading.Barrier(num_threads)
 
 def book_task_with_network_date(thread_id, target_time_str, token, bookdate, kssj, jssj, resource_id, time_id):
     target_time = get_target_datetime_from_network(target_time_str, bookdate)
-    print(f"绾跨▼{thread_id} 鐨勭洰鏍囨椂闂达細{target_time}")
+    print(f"线程{thread_id} 的目标时间：{target_time}")
     while True:
         now = get_network_time()
         if now:
@@ -915,16 +916,16 @@ def book_task_with_network_date(thread_id, target_time_str, token, bookdate, kss
             if diff_sec <= 0:
                 break
             elif diff_sec > 10:
-                print("鏃堕棿宸窛杩囧ぇ锛屼紤鎭?S")
+                print("时间差过大，休息 5S")
                 time.sleep(5)
             elif diff_sec > 1:
-                print("浼戞伅0.5S")
+                print("休息 0.5S")
                 time.sleep(0.5)
             else:
-                print("浼戞伅0.1S")
+                print("休息 0.1S")
                 time.sleep(0.1)
         else:
-            print("鏈幏寰楃綉缁滄椂闂达紝璇锋鏌ュ搴旂殑鎿嶄綔")
+            print("未获取到网络时间，请检查对应操作")
             time.sleep(1)
 
     print(f"thread {thread_id} reached target time, waiting barrier")
@@ -934,7 +935,7 @@ def book_task_with_network_date(thread_id, target_time_str, token, bookdate, kss
     print(f"thread {thread_id} booking response: {response}")
 
 def run_concurrent_booking_threads(target_time_str, token, bookdate, kssj, jssj, resources_name):
-    # 鍏堣皟鐢ㄤ竴娆¤幏鍙栬祫婧怚D鍜屾椂闂碔D
+    # 先调用一次，获取 resource_id 和 time_id
     result = fetch_resource_time_id(token, bookdate, resources_name, kssj, jssj)
     if not result:
         print("failed to get resource_id/time_id")
@@ -956,11 +957,11 @@ def run_concurrent_booking_threads(target_time_str, token, bookdate, kssj, jssj,
     print("all booking threads finished")
 
 def test_user_info(token):
-    """娴嬭瘯鐢ㄦ埛淇℃伅鑾峰彇鍔熻兘"""
-    print("娴嬭瘯鐢ㄦ埛淇℃伅鑾峰彇...")
+    """测试用户信息获取功能"""
+    print("测试用户信息获取...")
     user_info = get_user_info_from_appointment(token)
     if user_info:
-        print("鎴愬姛鑾峰彇鐢ㄦ埛淇℃伅:")
+        print("成功获取用户信息:")
         for key, value in user_info.items():
             if key != 'participant_info':
                 print(f"  {key}: {value}")
@@ -968,10 +969,10 @@ def test_user_info(token):
         for key, value in user_info['participant_info'].items():
             print(f"    {key}: {value}")
     else:
-        print("鑾峰彇鐢ㄦ埛淇℃伅澶辫触")
+        print("获取用户信息失败")
 
 if __name__ == '__main__':
-    # 閰嶇疆淇℃伅锛堜粠鐜鍙橀噺璇诲彇锛?
+    # 配置信息（从环境变量读取）
     LOGIN_URL = os.getenv("LOGIN_URL", WF_HOME_URL or CAS_LOGIN_URL)
     CAPTCHA_URL = CAS_CAPTCHA_URL
     USERNAME = os.getenv('CAS_USERNAME', '202300000000')
@@ -980,27 +981,27 @@ if __name__ == '__main__':
     kssj = '16:00'
     jssj = '17:00'
     resources_name = "羽毛球10号场地"
-    target_time_str = "12:12:00"  # 浣犳兂鎶㈢エ鐨勫噯鐐规椂闂?
+    target_time_str = "12:12:00"  # 你想抢票的准点时间
     
-    # 鐧诲綍鑾峰彇token
-    print("寮€濮嬬櫥褰?..")
+    # 登录获取 token
+    print("开始登录...")
     tokens = login_with_retry(LOGIN_URL, CAPTCHA_URL, USERNAME, PASSWORD, max_retries=5)
     
     if tokens and tokens.get('access_token'):
         print("\n" + "="*50)
-        print("鐧诲綍鎴愬姛锛佸紑濮嬫祴璇曠敤鎴蜂俊鎭幏鍙?..")
+        print("登录成功！开始测试用户信息获取...")
         
-        # 娴嬭瘯鐢ㄦ埛淇℃伅鑾峰彇
+        # 测试用户信息获取
         test_user_info(tokens['access_token'])
         
         print("\n" + "="*50)
-        print("寮€濮嬫姠绁ㄦ祦绋?..")
+        print("开始抢票流程...")
         
-        # 寮€濮嬫姠绁?
+        # 开始抢票
         run_concurrent_booking_threads(target_time_str, tokens['access_token'], bookdate, kssj, jssj, resources_name)
     else:
         print("login failed, cannot continue")
-# ---- Stable login fallback (keeps original cas_login) ----
+# ---- 稳定登录兜底实现（保留原 cas_login） ----
 from lxml import html as lxml_html
 
 def _stable_extract_execution(html_text: str):
@@ -1024,14 +1025,14 @@ def _stable_detect_event_order(html_text: str):
 
 def _stable_download_captcha(session: requests.Session, captcha_url: str) -> str:
     captcha_url = (captcha_url or CAS_CAPTCHA_URL).strip()
-    # OCR captcha in memory
+    # 在内存中 OCR 验证码
     r = session.get(captcha_url, timeout=15)
     code, *_ = predict_validate_code(r.content)
     return code
 
 
 def cas_login_stable(login_url, captcha_url, username, password):
-    """More resilient login via WF->SSO->CAS redirect chain."""
+    """更稳健的 WF->SSO->CAS 重定向链登录实现。"""
     session = None
     for _attempt in range(1, 4):
         session = requests.Session()

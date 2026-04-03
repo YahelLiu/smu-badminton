@@ -127,9 +127,9 @@ async def lifespan(app: FastAPI):
 
 
 if _DefaultResponse:
-    app = FastAPI(title="Badminton Booking API", version="1.0.0", lifespan=lifespan, default_response_class=_DefaultResponse)
+    app = FastAPI(title="羽毛球预约接口", version="1.0.0", lifespan=lifespan, default_response_class=_DefaultResponse)
 else:
-    app = FastAPI(title="Badminton Booking API", version="1.0.0", lifespan=lifespan)
+    app = FastAPI(title="羽毛球预约接口", version="1.0.0", lifespan=lifespan)
 
 # CORS（开发环境放开，生产环境请按需收敛）
 app.add_middleware(
@@ -228,12 +228,12 @@ class RateLimitMiddleware(BaseHTTPMiddleware):
                 count += 1.0
                 user_map[path] = (count, start_ts)
                 if count > max_per_window:
-                    logger.warning(f"429 Too Many Requests - ip={ip} path={path} count={count} window={window} max={max_per_window}")
+                    logger.warning(f"429 请求过于频繁 - ip={ip} path={path} count={count} window={window} max={max_per_window}")
                     # 返回更友好的 JSON 提示（仍然 429）
                     return JSONResponse(status_code=429, content={
                         "ok": False,
-                        "error": "Too Many Requests",
-                        "hint": "Request rate exceeded. Please slow down your polling.",
+                        "error": "请求过于频繁",
+                        "hint": "请求频率超限，请降低轮询频率。",
                         "limit": max_per_window,
                         "window_sec": window,
                         "path": path,
@@ -272,12 +272,12 @@ async def index():
     logger.info(f"请求首页，HTML路径: {html_path}, 存在: {os.path.exists(html_path)}")
     if not os.path.exists(html_path):
         logger.error(f"HTML 文件不存在: {html_path}")
-        return {"error": "index.html not found", "path": html_path, "base_dir": BASE_DIR}
+        return {"error": "未找到 index.html", "path": html_path, "base_dir": BASE_DIR}
     return FileResponse(html_path, media_type="text/html; charset=utf-8")
 
 @app.get("/favicon.ico")
 async def favicon():
-    # Avoid noisy 404s when browser auto-requests favicon
+    # 浏览器自动请求 favicon 时，避免产生无意义 404 日志
     return Response(status_code=204)
 
 
@@ -301,7 +301,7 @@ async def health():
 
 
 class UpdateConfigRequest(BaseModel):
-    login_url: str = Field(..., description="新的 CAS Login URL")
+    login_url: str = Field(..., description="新的 CAS 登录 URL")
 
 
 @app.post("/api/config/update")
@@ -385,7 +385,7 @@ async def update_config(req: UpdateConfigRequest):
         }
 
 
-# startup 生命周期已改为 lifespan，上面已处理
+# 启动生命周期已改为 lifespan，上方已处理
 
 @app.get("/jobs")
 async def jobs_page():
@@ -393,7 +393,7 @@ async def jobs_page():
     html_path = os.path.join(BASE_DIR, "templates", "jobs.html")
     if not os.path.exists(html_path):
         logger.error(f"HTML 文件不存在: {html_path}")
-        return {"error": "jobs.html not found", "path": html_path}
+        return {"error": "未找到 jobs.html", "path": html_path}
     return FileResponse(html_path)
 
 
@@ -475,7 +475,7 @@ def _new_job(resource_key: Tuple[str, str, str, str]) -> str:
             "status": "scheduled",
             "created_at": _time.time(),
             "resource_key": resource_key,
-            "logs": ["job scheduled"],
+            "logs": ["任务已创建"],
             "result": None,
         }
     return job_id
@@ -954,7 +954,7 @@ async def api_jobs_scheduled(req: JobScheduledRequest):
 @app.get("/api/jobs", response_model=JobsListResponse)
 async def api_jobs_list():
     jobs = booking_manager.list_jobs()
-    # merge DB scheduled jobs
+    # 合并数据库中的定时任务
     db_jobs = booking_manager.list_scheduled_jobs()
     return {"ok": True, "data": {"jobs": jobs, "db_jobs": db_jobs}}
 

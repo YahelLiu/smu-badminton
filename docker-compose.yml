@@ -3,6 +3,7 @@ services:
     build: .
     container_name: smu-badminton
     restart: unless-stopped
+    network_mode: host
     ports:
       - "5000:5000"
     volumes:
