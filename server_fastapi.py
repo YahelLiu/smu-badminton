@@ -1030,8 +1030,8 @@ if __name__ == "__main__":
     uvicorn.run(
         "server_fastapi:app",
         host="0.0.0.0",
-        port=5000,
-        reload=True,
+        port=5001,
+        reload=os.getenv("UVICORN_RELOAD", "0").lower() in {"1", "true", "yes", "on"},
         # 使用代理头部（X-Forwarded-For / X-Real-IP）打印真实客户端 IP
         proxy_headers=True,
         forwarded_allow_ips="*"

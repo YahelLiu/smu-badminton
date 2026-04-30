@@ -1,4 +1,4 @@
-<!DOCTYPE html>
+﻿<!DOCTYPE html>
 <html lang="zh-CN">
 <head>
     <meta charset="UTF-8">
@@ -505,6 +505,24 @@
             box-shadow: var(--shadow-md);
             border: 1px solid var(--border);
             padding-bottom: 2px; /* 留出一点滚动条空间 */
+        }
+        .table-container.is-loading {
+            pointer-events: none;
+            opacity: 0.68;
+        }
+        .table-container.is-loading::after {
+            content: "加载中...";
+            position: absolute;
+            inset: 0;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            background: rgba(248, 250, 252, 0.72);
+            color: var(--text-secondary);
+            font-weight: 600;
+        }
+        [data-theme="dark"] .table-container.is-loading::after {
+            background: rgba(15, 23, 42, 0.6);
         }
 
         /* 表格 */
@@ -1028,8 +1046,6 @@
                             <span class="court-cell">10</span>
                             <span class="court-cell">9</span>
                             <span class="court-cell">8</span>
-                        </div>
-                        <div class="court-row">
                             <span class="court-cell">7</span>
                             <span class="court-cell">6</span>
                             <span class="court-cell">5</span>
@@ -1261,7 +1277,9 @@
         const State = {
             isScheduleMode: true,
             pendingCell: null,
-            dialogAction: ''
+            dialogAction: '',
+            isLoading: false,
+            fetchToken: 0
         };
 
         // ============ 前端缓存管理 ============
@@ -1294,53 +1312,6 @@
             }
         };
 
-        // ============ 预加载管理 ============
-        const Preloader = {
-            _pending: new Set(),
-            
-            async preloadDate(date) {
-                if (!window.__auth) return;
-                const key = AvailabilityCache.getKey(date);
-                if (this._pending.has(key) || AvailabilityCache.get(date)) return;
-                
-                this._pending.add(key);
-                try {
-                    const resp = await fetch('/api/availability', {
-                        method: 'POST',
-                        headers: { 'Content-Type': 'application/json' },
-                        body: JSON.stringify({
-                            login_url: window.login_url,
-                            captcha_url: window.captcha_url,
-                            username: window.__auth.username,
-                            password: window.__auth.password,
-                            bookdate: date
-                        })
-                    });
-                    const data = await resp.json();
-                    if (data.ok) {
-                        AvailabilityCache.set(date, data);
-                    }
-                } catch(e) {
-                    console.log('预加载失败:', date, e);
-                } finally {
-                    this._pending.delete(key);
-                }
-            },
-            
-            async preloadAdjacent(currentDate) {
-                const current = new Date(currentDate);
-                const dates = [];
-                // 预加载前后3天
-                for (let i = -1; i <= 1; i++) {
-                    if (i === 0) continue;
-                    const d = new Date(current.getTime() + i * 24 * 60 * 60 * 1000);
-                    dates.push(`${d.getFullYear()}-${pad2(d.getMonth() + 1)}-${pad2(d.getDate())}`);
-                }
-                // 并行预加载
-                dates.forEach(date => this.preloadDate(date));
-            }
-        };
-
         // ============ DOM 元素 ============
         const Elements = {
             dateInput: document.getElementById('date'),
@@ -1352,12 +1323,34 @@
             dialogInfo: document.getElementById('dialog-info'),
             statusText: document.getElementById('status-text'),
             lastUpdate: document.getElementById('last-update'),
-            currentUsername: document.getElementById('current-username')
+            currentUsername: document.getElementById('current-username'),
+            tableContainer: document.getElementById('table-container'),
+            refreshBtn: document.getElementById('refreshBtn')
         };
 
         function renderCurrentUsername() {
             if (!Elements.currentUsername) return;
             Elements.currentUsername.textContent = window.__auth?.username || 'Not logged in';
+        }
+
+        function setLoading(isLoading) {
+            State.isLoading = isLoading;
+            if (Elements.tableContainer) {
+                Elements.tableContainer.classList.toggle('is-loading', isLoading);
+            }
+            if (Elements.refreshBtn) Elements.refreshBtn.disabled = isLoading;
+            if (Elements.dateInput) Elements.dateInput.disabled = isLoading;
+        }
+
+        async function fetchLocalBookings(date, forceRefresh) {
+            let others = [];
+            try {
+                const cacheBuster = forceRefresh ? `&_t=${Date.now()}` : '';
+                const r = await fetch(`/api/local_bookings?bookdate=${encodeURIComponent(date)}${cacheBuster}`);
+                const j = await r.json();
+                if (j.ok) others = j.data.list || [];
+            } catch (e) {}
+            return others;
         }
 
         // ============ 初始化表格 ============
@@ -1392,7 +1385,16 @@
         // 给外部挂载刷新以便可以被 date change 等事件触发
         window.fetchAndRenderBookings = async function(forceRefresh = false) {
             const date = Elements.dateInput.value;
-            if (!window.__auth) return;
+            if (!window.__auth) {
+                const ok = await promptLogin();
+                if (!ok) {
+                    Elements.statusText.textContent = '未登录';
+                    return;
+                }
+            }
+            const token = ++State.fetchToken;
+            const t0 = performance.now();
+            setLoading(true);
 
             // 先检查前端缓存
             let data = null;
@@ -1406,6 +1408,8 @@
                 Elements.statusText.textContent = '加载中...';
             }
             
+            const localBookingsPromise = fetchLocalBookings(date, forceRefresh);
+
             try {
                 // 如果没有缓存，从服务器获取
                 if (!data) {
@@ -1431,6 +1435,8 @@
                 } else {
                     console.log('使用前端缓存');
                 }
+
+                if (token !== State.fetchToken) return;
 
                 // 重置所有单元格
                 document.querySelectorAll('.hour-cell').forEach(cell => {
@@ -1462,20 +1468,15 @@
                     return;
                 }
 
-                Elements.statusText.textContent = `已更新 (缓存: ${data.from_cache ? '是' : '否'})`;
+                const elapsed = Math.round(performance.now() - t0);
+                Elements.statusText.textContent = `已更新 (缓存: ${data.from_cache ? '是' : '否'}，${elapsed}ms)`;
                 
                 const now = new Date();
                 Elements.lastUpdate.textContent = `上次更新: ${pad2(now.getHours())}:${pad2(now.getMinutes())}:${pad2(now.getSeconds())}`;
 
                 // 获取本地预约记录
-                let others = [];
-                try {
-                    // forceRefresh 时添加时间戳防止浏览器缓存
-                    const cacheBuster = forceRefresh ? `&_t=${Date.now()}` : '';
-                    const r = await fetch(`/api/local_bookings?bookdate=${encodeURIComponent(date)}${cacheBuster}`);
-                    const j = await r.json();
-                    if (j.ok) others = j.data.list || [];
-                } catch(e) {}
+                const others = await localBookingsPromise;
+                if (token !== State.fetchToken) return;
 
                 const list = data.data?.list || [];
                 
@@ -1519,12 +1520,13 @@
                 Elements.statusText.textContent = '已连接';
                 Elements.lastUpdate.textContent = `上次更新: ${new Date().toLocaleTimeString()}`;
                 
-                // 触发预加载相邻日期
-                Preloader.preloadAdjacent(date);
-                
             } catch (e) {
                 console.error('fetch error', e);
                 Elements.statusText.textContent = '连接错误';
+            } finally {
+                if (token === State.fetchToken) {
+                    setLoading(false);
+                }
             }
         }
         
@@ -1564,6 +1566,26 @@
                 const pEl = document.getElementById('login-password');
                 const cancelBtn = document.getElementById('login-cancel');
                 const togglePwd = document.getElementById('togglePwd');
+                if (!dlg || !form || !uEl || !pEl || !cancelBtn || !togglePwd) {
+                    resolve(false);
+                    return;
+                }
+
+                const closeDialog = () => {
+                    if (typeof dlg.close === 'function') {
+                        dlg.close();
+                    } else {
+                        dlg.removeAttribute('open');
+                    }
+                };
+
+                const openDialog = () => {
+                    if (typeof dlg.showModal === 'function') {
+                        if (!dlg.open) dlg.showModal();
+                    } else {
+                        dlg.setAttribute('open', 'open');
+                    }
+                };
 
                 togglePwd.onclick = () => {
                     const isPwd = pEl.type === 'password';
@@ -1571,7 +1593,7 @@
                     togglePwd.textContent = isPwd ? '隐藏' : '显示';
                 };
 
-                cancelBtn.onclick = () => { dlg.close(); resolve(false); };
+                cancelBtn.onclick = () => { closeDialog(); resolve(false); };
                 
                 form.onsubmit = (e) => {
                     e.preventDefault();
@@ -1584,7 +1606,7 @@
                     window.__auth = { username: u, password: p };
                     Auth.save(window.__auth);
                     renderCurrentUsername();
-                    dlg.close();
+                    closeDialog();
                     resolve(true);
                 };
 
@@ -1595,12 +1617,20 @@
                     pEl.value = cached.password || '';
                 }
 
-                dlg.showModal();
+                openDialog();
             });
         }
 
         // ============ 单元格点击处理 ============
-        function handleCellClick(cell) {
+        async function handleCellClick(cell) {
+            if (State.isLoading) {
+                Toast.info('请等待', '数据加载中');
+                return;
+            }
+            if (!window.__auth) {
+                const ok = await promptLogin();
+                if (!ok) return;
+            }
             if (cell.classList.contains('reserved')) return;
 
             const date = Elements.dateInput.value;
@@ -1830,7 +1860,7 @@
             // 表格点击 (事件委托)
             Elements.tbody.addEventListener('click', (e) => {
                 const cell = e.target.closest('.hour-cell');
-                if (cell) handleCellClick(cell);
+                if (cell) { void handleCellClick(cell); }
             });
 
             // 弹窗按钮

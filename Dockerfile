@@ -60,7 +60,7 @@ EXPOSE 5000
 
 # 健康检查 - 使用 wget 更可靠
 HEALTHCHECK --interval=30s --timeout=10s --start-period=5s --retries=3 \
-    CMD python -c "import urllib.request; urllib.request.urlopen('http://localhost:5000/', timeout=5)" || exit 1
+    CMD python -c "import urllib.request; urllib.request.urlopen('http://localhost:5000/health', timeout=5)" || exit 1
 
 # 启动命令
 CMD ["python", "server_fastapi.py"]

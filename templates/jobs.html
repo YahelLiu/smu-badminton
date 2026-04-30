@@ -3,7 +3,7 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>SMU Badminton - Jobs</title>
+    <title>SMU 羽毛球 - 任务中心</title>
     <style>
         /* CSS 变量 - 主题配色 (SaaS风格优化) */
         :root {
@@ -341,31 +341,54 @@
             display: inline-flex;
             align-items: center;
             gap: 6px;
-            padding: 4px 12px;
+            padding: 4px 11px;
             border-radius: 9999px; /* 完全圆角 */
-            font-size: 13px;
+            font-size: 12px;
             font-weight: 600;
-            box-shadow: 0 1px 2px rgba(0,0,0,0.05); /* 增加一点立体感 */
+            line-height: 1.4;
+            letter-spacing: 0.2px;
+            box-shadow: 0 1px 2px rgba(0, 0, 0, 0.05);
+            border: 1px solid var(--border);
         }
 
-        .status-badge.running { background-color: rgba(59, 130, 246, 0.15); color: #2563eb; border: 1px solid rgba(59, 130, 246, 0.3); }
+        .status-badge.running {
+            background-color: rgba(37, 99, 235, 0.14);
+            color: #1d4ed8;
+            border-color: rgba(37, 99, 235, 0.28);
+            font-weight: 600;
+        }
         .status-badge.running::before {
             content: '';
             width: 8px;
             height: 8px;
-            background: #2563eb;
+            background: #1d4ed8;
             border-radius: 50%;
             animation: pulse 2s infinite;
         }
 
-        .status-badge.done { background-color: rgba(16, 185, 129, 0.15); color: #059669; border: 1px solid rgba(16, 185, 129, 0.3); }
-        .status-badge.done::before { content: ''; width: 8px; height: 8px; background: #059669; border-radius: 50%; }
+        .status-badge.done {
+            background-color: rgba(16, 185, 129, 0.14);
+            color: #047857;
+            border-color: rgba(16, 185, 129, 0.28);
+            font-weight: 600;
+        }
+        .status-badge.done::before { content: ''; width: 8px; height: 8px; background: #047857; border-radius: 50%; }
 
-        .status-badge.failed { background-color: rgba(239, 68, 68, 0.15); color: #dc2626; border: 1px solid rgba(239, 68, 68, 0.3); }
-        .status-badge.failed::before { content: ''; width: 8px; height: 8px; background: #dc2626; border-radius: 50%; }
+        .status-badge.failed {
+            background-color: rgba(239, 68, 68, 0.14);
+            color: #b91c1c;
+            border-color: rgba(239, 68, 68, 0.28);
+            font-weight: 700;
+        }
+        .status-badge.failed::before { content: ''; width: 8px; height: 8px; background: #b91c1c; border-radius: 50%; }
 
-        .status-badge.scheduled { background-color: rgba(245, 158, 11, 0.15); color: #d97706; border: 1px solid rgba(245, 158, 11, 0.3); }
-        .status-badge.scheduled::before { content: ''; width: 8px; height: 8px; background: #d97706; border-radius: 50%; }
+        .status-badge.scheduled {
+            background-color: rgba(245, 158, 11, 0.14);
+            color: #b45309;
+            border-color: rgba(245, 158, 11, 0.28);
+            font-weight: 500;
+        }
+        .status-badge.scheduled::before { content: ''; width: 8px; height: 8px; background: #b45309; border-radius: 50%; }
 
         @keyframes pulse {
             0%, 100% { opacity: 1; }
@@ -386,16 +409,34 @@
             text-decoration: underline;
         }
 
-        .params-content {
-            font-family: 'Monaco', 'Menlo', monospace;
+        .params-panel {
+            display: flex;
+            flex-direction: column;
+            gap: 10px;
+        }
+        .params-summary {
+            display: grid;
+            grid-template-columns: repeat(2, minmax(0, 1fr));
+            gap: 12px;
+        }
+        .params-card {
+            padding: 14px 16px;
+            border: 1px solid var(--border);
+            border-radius: 10px;
+            background: linear-gradient(180deg, var(--bg-secondary) 0%, var(--bg-primary) 100%);
+        }
+        .params-label {
             font-size: 12px;
-            background: var(--bg-primary);
-            padding: 12px;
-            border-radius: 6px;
-            white-space: pre-wrap;
-            word-break: break-all;
-            max-height: 200px;
-            overflow-y: auto;
+            color: var(--text-secondary);
+            margin-bottom: 6px;
+            text-transform: uppercase;
+            letter-spacing: 0.4px;
+        }
+        .params-value {
+            font-size: 14px;
+            font-weight: 600;
+            color: var(--text-primary);
+            word-break: break-word;
         }
 
         /* 空状态 */
@@ -495,6 +536,18 @@
             width: 90%;
             background: var(--bg-secondary);
             color: var(--text-primary);
+            font-family: inherit;
+            margin: auto;
+        }
+
+        #params-dialog {
+            max-width: min(860px, 92vw);
+        }
+
+        dialog[open] {
+            position: fixed;
+            inset: 0;
+            margin: auto;
         }
 
         dialog::backdrop {
@@ -517,6 +570,30 @@
             max-height: 400px;
             overflow-y: auto;
         }
+        .dialog-info {
+            display: flex;
+            flex-direction: column;
+            gap: 12px;
+        }
+        .dialog-info-item {
+            display: flex;
+            justify-content: space-between;
+            gap: 16px;
+            padding: 10px 14px;
+            background: var(--bg-primary);
+            border-radius: 6px;
+        }
+        .dialog-info-label {
+            color: var(--text-secondary);
+            font-size: 14px;
+            flex-shrink: 0;
+        }
+        .dialog-info-value {
+            font-weight: 600;
+            font-size: 14px;
+            word-break: break-word;
+            text-align: right;
+        }
 
         .dialog-footer {
             padding: 16px 24px;
@@ -525,6 +602,138 @@
             justify-content: flex-end;
             gap: 12px;
         }
+        .login-form {
+            display: flex;
+            flex-direction: column;
+            gap: 16px;
+        }
+        .login-field {
+            display: flex;
+            flex-direction: column;
+            gap: 6px;
+        }
+        .login-field label {
+            font-size: 14px;
+            font-weight: 500;
+        }
+        .login-input-wrapper {
+            position: relative;
+        }
+        .login-input {
+            width: 100%;
+            padding: 12px 16px;
+            border: 1px solid var(--border);
+            border-radius: var(--radius);
+            background: var(--bg-primary);
+            color: var(--text-primary);
+            font-size: 14px;
+            transition: var(--transition);
+        }
+        .login-input:focus,
+        .dialog-textarea:focus {
+            outline: none;
+            border-color: var(--primary);
+            box-shadow: 0 0 0 3px rgba(59, 130, 246, 0.1);
+        }
+        .toggle-password {
+            position: absolute;
+            right: 12px;
+            top: 50%;
+            transform: translateY(-50%);
+            background: none;
+            border: none;
+            color: var(--text-secondary);
+            cursor: pointer;
+            font-size: 13px;
+        }
+        .dialog-note {
+            margin-top: 8px;
+            font-size: 12px;
+            color: var(--text-secondary);
+        }
+        .dialog-text-block {
+            padding: 12px;
+            background: var(--bg-primary);
+            border-radius: 6px;
+            font-size: 12px;
+            word-break: break-all;
+            max-height: 120px;
+            overflow-y: auto;
+            font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+        }
+        .dialog-textarea {
+            width: 100%;
+            min-height: 100px;
+            padding: 12px;
+            border: 1px solid var(--border);
+            border-radius: 6px;
+            background: var(--bg-primary);
+            color: var(--text-primary);
+            font-size: 13px;
+            font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+            resize: vertical;
+            transition: var(--transition);
+        }
+        #config-dialog .dialog-body > div,
+        #login-dialog .dialog-body > div,
+        #login-dialog .dialog-body > form > div {
+            display: flex !important;
+            flex-direction: column !important;
+            gap: 16px !important;
+        }
+        #config-dialog label,
+        #login-dialog label {
+            display: block !important;
+            font-size: 14px !important;
+            font-weight: 500 !important;
+            margin-bottom: 6px !important;
+        }
+        #current-login-url {
+            padding: 12px !important;
+            background: var(--bg-primary) !important;
+            border-radius: 6px !important;
+            font-size: 12px !important;
+            word-break: break-all !important;
+            max-height: 120px !important;
+            overflow-y: auto !important;
+            font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace !important;
+        }
+        #new-login-url,
+        #login-username,
+        #login-password {
+            width: 100% !important;
+            padding: 12px 16px !important;
+            border: 1px solid var(--border) !important;
+            border-radius: var(--radius) !important;
+            background: var(--bg-primary) !important;
+            color: var(--text-primary) !important;
+            font-size: 14px !important;
+            transition: var(--transition) !important;
+        }
+        #new-login-url {
+            min-height: 100px !important;
+            font-size: 13px !important;
+            font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace !important;
+            resize: vertical !important;
+        }
+        #new-login-url:focus,
+        #login-username:focus,
+        #login-password:focus {
+            outline: none !important;
+            border-color: var(--primary) !important;
+            box-shadow: 0 0 0 3px rgba(59, 130, 246, 0.1) !important;
+        }
+        #togglePwd {
+            position: absolute !important;
+            right: 12px !important;
+            top: 50% !important;
+            transform: translateY(-50%) !important;
+            background: none !important;
+            border: none !important;
+            color: var(--text-secondary) !important;
+            cursor: pointer !important;
+            font-size: 13px !important;
+        }
 
         /* 响应式 */
         @media (max-width: 768px) {
@@ -532,6 +741,7 @@
             .header { flex-direction: column; gap: 12px; }
             .stats { grid-template-columns: repeat(2, 1fr); }
             .jobs-table th, .jobs-table td { padding: 10px 12px; font-size: 13px; }
+            .params-summary { grid-template-columns: 1fr; }
         }
     </style>
 </head>
@@ -543,7 +753,7 @@
         <!-- 头部 -->
         <header class="header">
             <div class="header-left">
-                <span class="logo">SMU 羽毛球 Jobs</span>
+                <span class="logo">SMU 羽毛球任务</span>
                 <a href="/" class="back-link">← 返回预约页面</a>
             </div>
             <div class="header-right">
@@ -583,7 +793,7 @@
                 <table class="jobs-table" id="jobs-table">
                     <thead>
                         <tr>
-                            <th>Job ID</th>
+                            <th>任务ID</th>
                             <th>类型</th>
                             <th>创建时间</th>
                             <th>状态</th>
@@ -611,7 +821,9 @@
             <h3 class="dialog-title">📄 任务参数</h3>
         </div>
         <div class="dialog-body">
-            <pre class="params-content" id="params-content"></pre>
+            <div class="params-panel">
+                <div class="params-summary" id="params-summary"></div>
+            </div>
         </div>
         <div class="dialog-footer">
             <button class="btn btn-primary" id="params-close">关闭</button>
@@ -626,16 +838,16 @@
         <div class="dialog-body">
             <div style="display: flex; flex-direction: column; gap: 20px;">
                 <div>
-                    <label style="display: block; font-weight: 600; margin-bottom: 8px; font-size: 14px;">当前 Login URL</label>
+                    <label style="display: block; font-weight: 600; margin-bottom: 8px; font-size: 14px;">当前登录地址</label>
                     <div style="padding: 12px; background: var(--bg-primary); border-radius: 6px; font-size: 12px; word-break: break-all; max-height: 120px; overflow-y: auto; font-family: monospace;" id="current-login-url">
                         加载中...
                     </div>
                 </div>
                 <div>
-                    <label for="new-login-url" style="display: block; font-weight: 600; margin-bottom: 8px; font-size: 14px;">新的 Login URL</label>
+                    <label for="new-login-url" style="display: block; font-weight: 600; margin-bottom: 8px; font-size: 14px;">新的登录地址</label>
                     <textarea 
                         id="new-login-url" 
-                        placeholder="输入新的 Login URL"
+                        placeholder="输入新的登录地址"
                         style="width: 100%; min-height: 100px; padding: 12px; border: 1px solid var(--border); border-radius: 6px; background: var(--bg-primary); color: var(--text-primary); font-size: 13px; font-family: monospace; resize: vertical;"
                     ></textarea>
                     <div style="margin-top: 8px; font-size: 12px; color: var(--text-secondary);">
@@ -810,7 +1022,7 @@
         // ============ DOM 元素 ============
         const tbody = document.getElementById('jobs-tbody');
         const paramsDialog = document.getElementById('params-dialog');
-        const paramsContent = document.getElementById('params-content');
+        const paramsSummary = document.getElementById('params-summary');
 
         // ============ 获取任务列表 ============
         async function fetchJobs() {
@@ -907,13 +1119,13 @@
 
             tbody.innerHTML = jobs.map(job => {
                 const statusClass = job.alive ? 'running' : (job.status || 'done');
-                const statusText = job.alive ? '运行中' : getStatusText(job.status);
+                const statusText = job.alive ? '执行中' : getStatusText(job.status);
                 const createdAt = new Date(job.created_at * 1000).toLocaleString();
                 
                 return `
                     <tr>
                         <td><span class="job-id">${job.job_id.substring(0, 8)}...</span></td>
-                        <td>${job.type || '-'}</td>
+                        <td>${getTypeText(job.type)}</td>
                         <td>${createdAt}</td>
                         <td><span class="status-badge ${statusClass}">${statusText}</span></td>
                         <td class="params-preview">
@@ -936,16 +1148,58 @@
         function getStatusText(status) {
             const map = {
                 'done': '已完成',
-                'failed': '失败',
+                'failed': '已失败',
                 'cancelled': '已取消',
-                'scheduled': '等待中'
+                'scheduled': '待执行'
             };
             return map[status] || status || '已结束';
         }
 
+        function getTypeText(type) {
+            const map = {
+                'immediate': '即时任务',
+                'scheduled': '定时任务'
+            };
+            return map[type] || type || '-';
+        }
+
         // ============ 显示参数 ============
         function showParams(encodedParams) {
-            paramsContent.textContent = decodeURIComponent(encodedParams);
+            const raw = decodeURIComponent(encodedParams);
+
+            let params = {};
+            try {
+                params = JSON.parse(raw);
+            } catch (e) {
+                params = {};
+            }
+
+            const fields = [
+                ['username', '用户'],
+                ['bookdate', '日期'],
+                ['kssj', '开始时间'],
+                ['jssj', '结束时间'],
+                ['resources_name', '场地'],
+                ['target_time_str', '抢票时间'],
+                ['num_threads', '并发线程'],
+            ];
+
+            const summaryHtml = fields
+                .filter(([key]) => params[key] !== undefined && params[key] !== null && params[key] !== '')
+                .map(([key, label]) => `
+                    <div class="params-card">
+                        <div class="params-label">${label}</div>
+                        <div class="params-value">${params[key]}</div>
+                    </div>
+                `)
+                .join('');
+
+            paramsSummary.innerHTML = summaryHtml || `
+                <div class="params-card">
+                    <div class="params-label">提示</div>
+                    <div class="params-value">这条任务没有可结构化展示的参数</div>
+                </div>
+            `;
             paramsDialog.showModal();
         }
 
@@ -1000,7 +1254,7 @@
             const newUrl = newLoginUrlEl.value.trim();
             
             if (!newUrl) {
-                Toast.error('验证失败', '请输入 Login URL');
+                Toast.error('验证失败', '请输入登录地址');
                 return;
             }
             

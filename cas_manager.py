@@ -78,6 +78,7 @@ class BookingManager:
                     "alive": job.thread.is_alive(),
                     "type": job.meta.get("type"),
                     "created_at": job.meta.get("created_at"),
+                    "username": job.meta.get("username") or job.meta.get("params", {}).get("username"),
                     "params": job.meta.get("params", {}),
                 })
             return out
@@ -378,7 +379,14 @@ class BookingManager:
         meta = {
             "type": "immediate",
             "created_at": time.time(),
-            "params": {"bookdate": bookdate, "kssj": kssj, "jssj": jssj, "resources_name": resources_name},
+            "username": username,
+            "params": {
+                "username": username,
+                "bookdate": bookdate,
+                "kssj": kssj,
+                "jssj": jssj,
+                "resources_name": resources_name,
+            },
         }
         job_id = self._register(th, cancel_event, meta)
         th.start()
@@ -581,6 +589,7 @@ class BookingManager:
             "type": "scheduled",
             "created_at": time.time(),
             "params": {
+                "username": username,
                 "bookdate": bookdate, "kssj": kssj, "jssj": jssj,
                 "resources_name": resources_name, "target_time_str": target_time_str,
                 "num_threads": num_threads,
