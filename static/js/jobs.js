@@ -19,6 +19,18 @@ const Auth = {
 // 全局认证对象
 window.__auth = null;
 
+// ============ 授权检查 ============
+async function checkAuthorization(username) {
+    try {
+        const resp = await fetch(`/api/auth/check?username=${encodeURIComponent(username)}`);
+        const data = await resp.json();
+        return data.ok && data.authorized;
+    } catch (e) {
+        console.error('授权检查失败:', e);
+        return false;
+    }
+}
+
 // ============ 登录对话框 ============
 const loginDialog = document.getElementById('login-dialog');
 const loginForm = document.getElementById('login-form');
@@ -27,7 +39,7 @@ const loginPasswordEl = document.getElementById('login-password');
 const togglePwdBtn = document.getElementById('togglePwd');
 const loginCancelBtn = document.getElementById('login-cancel');
 
-function promptLogin() {
+async function promptLogin() {
     return new Promise(resolve => {
         togglePwdBtn.onclick = () => {
             const isPwd = loginPasswordEl.type === 'password';
@@ -40,7 +52,7 @@ function promptLogin() {
             resolve(false);
         };
 
-        loginForm.onsubmit = (e) => {
+        loginForm.onsubmit = async (e) => {
             e.preventDefault();
             const u = (loginUsernameEl.value || '').trim();
             const p = (loginPasswordEl.value || '').trim();
@@ -49,8 +61,9 @@ function promptLogin() {
                 return;
             }
 
-            // 验证是否为授权用户
-            if (u !== '202540510004') {
+            // 通过后端 API 验证是否为授权用户
+            const isAuthorized = await checkAuthorization(u);
+            if (!isAuthorized) {
                 Toast.error('权限不足', '您没有权限访问该页面');
                 return;
             }
@@ -223,7 +236,7 @@ function renderJobs(jobs) {
 
     tbody.innerHTML = jobs.map(job => {
         const statusClass = job.alive ? 'running' : (job.status || 'done');
-        const statusText = job.alive ? '执行中' : getStatusText(job.status);
+        const statusText = job.alive ? '执行中' : getStatusText(job.status, job.type);
         const createdAt = new Date(job.created_at * 1000).toLocaleString();
 
         return `
@@ -249,20 +262,22 @@ function renderJobs(jobs) {
     }).join('');
 }
 
-function getStatusText(status) {
+function getStatusText(status, type) {
     const map = {
-        'done': '已完成',
-        'failed': '已失败',
+        'done': '✅ 预约成功',
+        'failed': '❌ 失败',
         'cancelled': '已取消',
-        'scheduled': '待执行'
+        'scheduled': '待执行',
+        'running': '执行中',
+        'skipped': '⏭️ 已跳过'
     };
     return map[status] || status || '已结束';
 }
 
 function getTypeText(type) {
     const map = {
-        'immediate': '即时任务',
-        'scheduled': '定时任务'
+        'immediate': '⚡ 即时任务',
+        'scheduled': '⏰ 定时任务'
     };
     return map[type] || type || '-';
 }
@@ -406,8 +421,9 @@ async function init() {
     // 尝试从缓存加载认证信息
     const cached = Auth.load();
     if (cached && cached.username && cached.password) {
-        // 验证是否为授权用户
-        if (cached.username === '202540510004') {
+        // 通过后端 API 验证是否为授权用户
+        const isAuthorized = await checkAuthorization(cached.username);
+        if (isAuthorized) {
             window.__auth = cached;
         } else {
             Auth.clear();

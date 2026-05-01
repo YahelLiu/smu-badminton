@@ -1,162 +1,106 @@
-# SMU 羽毛球预约系统 - 任务系统规范化
+# SMU 羽毛球预约系统 - 安全性改进计划
 
 ## 背景
 
-当前任务系统存在以下问题：
-1. **即时任务无持久化** - 即时任务（immediate）只存在内存中，完成后没有任何记录
-2. **状态显示混乱** - 任务完成后，用户无法看到历史任务状态
-3. **即时任务和预约显示相同** - 即时任务完成后应该有独立的"完成"提示，而不是和预约记录混在一起
+当前系统存在安全问题：
+1. **密码明文存储** - `scheduled_jobs` 表存储明文密码
+2. **硬编码授权用户** - `jobs.js` 中写死授权学号
+3. **CORS 配置宽松** - 生产环境允许 `*` 来源
+
+### 约束条件
+
+- Token 有效期不确定，不适合持久化到数据库
+- 用户不能每次操作都输入密码
+- 密码需要存储（用于定时任务），但要加密/混淆
 
 ---
 
-## 当前问题分析
+## 改进方案
 
-### 任务生命周期对比
+### 1. 密码混淆存储
 
-| 阶段 | 即时任务 (immediate) | 定时任务 (scheduled) |
-|------|---------------------|---------------------|
-| 创建 | 内存 `_jobs` 字典 | 内存 + 数据库 `scheduled_jobs` 表 |
-| 执行 | 立即执行 | 等待到目标时间执行 |
-| 完成 | ❌ 无记录，直接消失 | ✅ 更新数据库状态为 done/failed |
-| 查询 | 只能查到活跃任务 | 可查历史任务 |
+**方案：** 使用对称加密（AES）或简单混淆存储密码
 
-### 代码层面问题
+**修改文件：** `cas_manager.py`、`core_utils.py`
 
-**`start_immediate_booking()` 缺少：**
-1. 数据库持久化调用
-2. 完成后的状态更新
-
-**`list_jobs()` 只返回活跃任务：**
+**实现：**
 ```python
-# 过滤已结束线程，顺便回收
-if not job.thread.is_alive() or job.cancel_event.is_set():
-    continue  # 跳过已完成的任务
+# core_utils.py - 新增
+import base64
+import os
+
+# 简单混淆方案（可逆）
+def obfuscate_password(password: str) -> str:
+    """混淆密码"""
+    key = os.getenv("SECRET_KEY", "default-secret-key")
+    # 简单 XOR + base64
+    encoded = ''.join(chr(ord(c) ^ ord(key[i % len(key)])) for i, c in enumerate(password))
+    return base64.b64encode(encoded.encode()).decode()
+
+def deobfuscate_password(obfuscated: str) -> str:
+    """还原密码"""
+    key = os.getenv("SECRET_KEY", "default-secret-key")
+    decoded = base64.b64decode(obfuscated.encode()).decode()
+    return ''.join(chr(ord(c) ^ ord(key[i % len(key)])) for i, c in enumerate(decoded))
 ```
 
-**`list_scheduled_jobs()` 只查数据库：**
-- 只返回 `scheduled_jobs` 表的数据
-- 即时任务从未写入该表
+**修改 `cas_manager.py`：**
+- `_persist_job_row()` - 存储前调用 `obfuscate_password()`
+- `load_pending_jobs()` - 读取后调用 `deobfuscate_password()`
+- `book_badminton_slot()` - 存储前混淆密码
 
 ---
 
-## 实施方案
+### 2. 授权用户配置化
 
-### 方案：复用 `scheduled_jobs` 表存储所有任务
+**方案：** 移除前端硬编码，改为后端配置
 
-将 `scheduled_jobs` 表改名为任务表，同时存储即时任务和定时任务。
+**修改文件：** `static/js/jobs.js`、`server_fastapi.py`
 
-**优点：**
-- 改动最小
-- 不需要新建表
-- 历史代码逻辑可复用
+**实现：**
 
-### 修改步骤
-
-#### 1. 修改 `start_immediate_booking()` - 添加数据库持久化
-
-**文件：** `cas_manager.py`
-
+**后端新增 API：**
 ```python
-def start_immediate_booking(self, ...) -> str:
-    # ... 现有代码 ...
+# server_fastapi.py
+AUTHORIZED_USERS = os.getenv("AUTHORIZED_USERS", "202540510004").split(",")
 
-    job_id = self._register(th, cancel_event, meta)
-
-    # 新增：持久化即时任务到数据库
-    self._persist_job_row(
-        job_id,
-        login_url=login_url,
-        captcha_url=captcha_url,
-        username=username,
-        password=password,
-        bookdate=bookdate,
-        kssj=kssj,
-        jssj=jssj,
-        resources_name=resources_name,
-        target_time_str="",  # 即时任务无目标时间
-        num_threads=1,
-        status="running",
-    )
-
-    th.start()
-    return job_id
+@app.get("/api/auth/check")
+async def check_auth(username: str):
+    """检查用户是否有管理员权限"""
+    return {"ok": True, "authorized": username in AUTHORIZED_USERS}
 ```
 
-#### 2. 修改即时任务执行逻辑 - 添加状态更新
-
-**文件：** `cas_manager.py` 的 `run()` 函数
-
-```python
-def run():
-    if cancel_event.is_set():
-        self._update_job_row_status(job_id, "cancelled")
-        return
-
-    # ... 登录逻辑 ...
-    if not tokens:
-        self._update_job_row_status(job_id, "failed")
-        return
-
-    # ... 预约逻辑 ...
-    result = fetch_resource_time_id(...)
-    if not result:
-        self._update_job_row_status(job_id, "failed")
-        return
-
-    # 预约成功
-    resp = make_appointment(...)
-    if resp and resp.get("code") == "success":
-        self._update_job_row_status(job_id, "done")
-    else:
-        self._update_job_row_status(job_id, "failed")
+**前端修改：**
+```javascript
+// jobs.js - 替换硬编码检查
+async function checkAuthorization(username) {
+    const resp = await fetch(`/api/auth/check?username=${username}`);
+    const data = await resp.json();
+    return data.authorized;
+}
 ```
 
-#### 3. 修改 `list_jobs()` - 返回所有活跃任务（保持不变）
+---
 
-当前逻辑已经正确，只返回活跃任务。
+### 3. CORS 配置收紧
 
-#### 4. 修改 `list_scheduled_jobs()` - 返回所有历史任务
+**方案：** 使用环境变量配置允许的来源
 
-**文件：** `cas_manager.py`
+**修改文件：** `server_fastapi.py`
 
+**实现：**
 ```python
-def list_all_jobs(self, username: str | None = None) -> List[Dict[str, Any]]:
-    """获取所有任务（包括即时任务和定时任务）"""
-    with self._db_pool.get_connection(auto_commit=False) as conn:
-        if username:
-            cur = conn.execute(
-                """SELECT job_id, username, bookdate, kssj, jssj, resources_name,
-                          target_time_str, num_threads, status, created_at
-                   FROM scheduled_jobs
-                   WHERE username=?
-                   ORDER BY created_at DESC""",
-                (username,),
-            )
-        else:
-            cur = conn.execute(
-                """SELECT job_id, username, bookdate, kssj, jssj, resources_name,
-                          target_time_str, num_threads, status, created_at
-                   FROM scheduled_jobs
-                   ORDER BY created_at DESC"""
-            )
-        # ... 返回格式化结果 ...
+# 开发环境默认值，生产环境通过环境变量配置
+ALLOWED_ORIGINS = os.getenv("ALLOWED_ORIGINS", "http://localhost:5001,http://127.0.0.1:5001").split(",")
+
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=ALLOWED_ORIGINS,
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
 ```
-
-#### 5. 修改 API `/api/jobs` - 合并返回
-
-**文件：** `server_fastapi.py`
-
-```python
-@app.get("/api/jobs", response_model=JobsListResponse)
-async def api_jobs_list():
-    jobs = booking_manager.list_jobs()  # 内存中的活跃任务
-    db_jobs = booking_manager.list_all_jobs()  # 数据库中的所有任务（含历史）
-    return {"ok": True, "data": {"jobs": jobs, "db_jobs": db_jobs}}
-```
-
-#### 6. 前端 `jobs.js` - 区分任务类型显示
-
-即时任务完成显示 "✅ 预约成功"，定时任务完成显示 "🎯 抢票成功"。
 
 ---
 
@@ -164,22 +108,35 @@ async def api_jobs_list():
 
 | 文件 | 修改内容 |
 |------|----------|
-| `cas_manager.py` | 1. `start_immediate_booking()` 添加数据库持久化 |
-| `cas_manager.py` | 2. 即时任务 `run()` 添加状态更新 |
-| `cas_manager.py` | 3. `list_scheduled_jobs()` 重命名为 `list_all_jobs()` |
-| `server_fastapi.py` | 4. `/api/jobs` 调用新方法 |
-| `static/js/jobs.js` | 5. 前端区分即时/定时任务显示 |
+| `core_utils.py` | 新增 `obfuscate_password()` 和 `deobfuscate_password()` |
+| `cas_manager.py` | 存储前混淆密码，读取后还原密码 |
+| `server_fastapi.py` | 新增 `/api/auth/check` API，CORS 配置使用环境变量 |
+| `static/js/jobs.js` | 移除硬编码授权用户，改为调用 API 检查 |
 
 ---
 
 ## 验证方案
 
-1. 创建一个即时任务，观察：
-   - 数据库 `scheduled_jobs` 表有新记录
-   - 任务完成后状态变为 `done` 或 `failed`
-2. 访问 `/jobs` 页面：
-   - 能看到即时任务的历史记录
-   - 状态显示正确
-3. 创建一个定时任务，观察：
-   - 功能不受影响
-   - 任务列表正确合并显示
+1. **密码混淆测试：**
+   ```python
+   from core_utils import obfuscate_password, deobfuscate_password
+   original = "my_password"
+   obfuscated = obfuscate_password(original)
+   assert deobfuscate_password(obfuscated) == original
+   ```
+
+2. **定时任务测试：**
+   - 创建定时任务，检查数据库密码字段是否已混淆
+   - 重启服务，检查定时任务能否正常恢复执行
+
+3. **授权检查测试：**
+   - 访问 `/jobs` 页面，非授权用户应被拒绝
+   - 授权用户应能正常访问
+
+---
+
+## 注意事项
+
+- **SECRET_KEY** 建议在生产环境设置随机值
+- **AUTHORIZED_USERS** 可配置多个用户，用逗号分隔
+- 混淆方案不是真正的加密，但能防止明文泄露

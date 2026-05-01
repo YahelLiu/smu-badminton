@@ -416,6 +416,50 @@ def close_db_pool():
             logger.info("全局数据库连接池已关闭")
 
 
+# ============= 密码混淆工具 =============
+
+import base64
+
+def obfuscate_password(password: str) -> str:
+    """
+    混淆密码（可逆）
+    用于存储时保护密码，不是真正的加密，但能防止明文泄露
+
+    Args:
+        password: 原始密码
+
+    Returns:
+        混淆后的字符串
+    """
+    if not password:
+        return ""
+    key = os.getenv("SECRET_KEY", "smu-badminton-default-key")
+    # XOR + base64
+    encoded = ''.join(chr(ord(c) ^ ord(key[i % len(key)])) for i, c in enumerate(password))
+    return base64.b64encode(encoded.encode()).decode()
+
+
+def deobfuscate_password(obfuscated: str) -> str:
+    """
+    还原混淆的密码
+
+    Args:
+        obfuscated: 混淆后的字符串
+
+    Returns:
+        原始密码
+    """
+    if not obfuscated:
+        return ""
+    key = os.getenv("SECRET_KEY", "smu-badminton-default-key")
+    try:
+        decoded = base64.b64decode(obfuscated.encode()).decode()
+        return ''.join(chr(ord(c) ^ ord(key[i % len(key)])) for i, c in enumerate(decoded))
+    except Exception:
+        # 如果解密失败，可能是明文密码（兼容旧数据）
+        return obfuscated
+
+
 # ============= 使用示例（注释） =============
 
 """

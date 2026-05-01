@@ -134,7 +134,7 @@ if _DefaultResponse:
 else:
     app = FastAPI(title="羽毛球预约接口", version="1.0.0", lifespan=lifespan)
 
-# CORS（开发环境放开，生产环境请按需收敛）
+# CORS 配置（允许所有来源访问）
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
@@ -289,11 +289,21 @@ async def get_config():
     import config
     import importlib
     importlib.reload(config)
-    
+
     return {
         "ok": True,
         "data": config.get_frontend_config()
     }
+
+
+# 授权用户配置（通过环境变量配置，多个用户用逗号分隔）
+AUTHORIZED_USERS = set(os.getenv("AUTHORIZED_USERS", "202540510004").split(","))
+
+
+@app.get("/api/auth/check")
+async def check_auth(username: str):
+    """检查用户是否有管理员权限（访问 /jobs 页面的权限）"""
+    return {"ok": True, "authorized": username in AUTHORIZED_USERS}
 
 
 @app.get("/health")
@@ -853,9 +863,8 @@ async def api_jobs_scheduled(req: JobScheduledRequest):
 
 @app.get("/api/jobs", response_model=JobsListResponse)
 async def api_jobs_list():
-    jobs = booking_manager.list_jobs()
-    # 合并数据库中的定时任务
-    db_jobs = booking_manager.list_scheduled_jobs()
+    jobs = booking_manager.list_jobs()  # 内存中的活跃任务
+    db_jobs = booking_manager.list_scheduled_jobs()  # 数据库中的所有任务（含历史）
     return {"ok": True, "data": {"jobs": jobs, "db_jobs": db_jobs}}
 
 @app.get("/api/metrics")
