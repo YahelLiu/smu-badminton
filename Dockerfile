@@ -32,8 +32,8 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     g++ \
     && rm -rf /var/lib/apt/lists/*
 
-# 复制依赖文件（使用专门的 Docker 依赖文件）
-COPY requirements_docker.txt .
+# 复制依赖文件
+COPY requirements.txt .
 
 # 先安装核心依赖，避免一次性安装失败
 RUN pip install --no-cache-dir --upgrade pip setuptools wheel
@@ -47,7 +47,7 @@ RUN pip install --no-cache-dir \
     python-dotenv==1.1.1
 
 # 安装其他依赖（如果失败不影响核心功能）
-RUN pip install --no-cache-dir -r requirements_docker.txt || true
+RUN pip install --no-cache-dir -r requirements.txt || true
 
 # 复制应用代码
 COPY . .
