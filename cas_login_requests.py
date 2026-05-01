@@ -411,31 +411,51 @@ def extract_oidc_tokens(url):
     
     return tokens if tokens else None
 
-def requests_post_with_retry(url, json, headers, max_retries=10, retry_interval=1):
+def _is_ssl_error(error: Exception) -> bool:
+    """判断是否为 SSL 相关错误"""
+    error_str = str(error).lower()
+    return 'ssl' in error_str or 'eof' in error_str or 'protocol' in error_str
+
+
+def requests_post_with_retry(url, json, headers, max_retries=3, timeout=8):
+    """带重试的 POST 请求，使用指数退避策略"""
     for attempt in range(max_retries):
         try:
-            response = requests.post(url, json=json, headers=headers, timeout=15)
+            response = requests.post(url, json=json, headers=headers, timeout=timeout)
             if response.status_code == 200:
                 return response
             else:
                 print(f"request failed status={response.status_code}, retrying ({attempt + 1}/{max_retries})")
         except Exception as e:
             print(f"request exception={e}, retrying ({attempt + 1}/{max_retries})")
-        time.sleep(retry_interval)
+            # SSL 错误快速失败，不继续重试
+            if _is_ssl_error(e) and attempt >= 1:
+                print("SSL error detected, failing fast")
+                break
+        # 指数退避: 1s, 2s, 4s...
+        if attempt < max_retries - 1:
+            time.sleep(2 ** attempt)
     print("request failed too many times, giving up")
     return None
 
-def requests_get_with_retry(url, max_retries=10, retry_interval=1):
+def requests_get_with_retry(url, max_retries=3, timeout=8):
+    """带重试的 GET 请求，使用指数退避策略"""
     for attempt in range(max_retries):
         try:
-            response = requests.get(url, timeout=15)
+            response = requests.get(url, timeout=timeout)
             if response.status_code == 200:
                 return response
             else:
                 print(f"request failed status={response.status_code}, retrying ({attempt + 1}/{max_retries})")
         except Exception as e:
             print(f"request exception={e}, retrying ({attempt + 1}/{max_retries})")
-        time.sleep(retry_interval)
+            # SSL 错误快速失败
+            if _is_ssl_error(e) and attempt >= 1:
+                print("SSL error detected, failing fast")
+                break
+        # 指数退避
+        if attempt < max_retries - 1:
+            time.sleep(2 ** attempt)
     print("request failed too many times, giving up")
     return None
 
@@ -591,16 +611,23 @@ def list_appointments_for_account(token, bookdate):
     return same_day
 
 def compute_availability_for_date(token, bookdate):
+    import logging
+    logger = logging.getLogger(__name__)
+    t0 = time.time()
+
     # 并发获取资源列表和用户预约记录
+    t1 = time.time()
     with ThreadPoolExecutor(max_workers=2) as init_executor:
         resources_future = init_executor.submit(list_resources_by_account, token, bookdate)
         appointments_future = init_executor.submit(list_appointments_for_account, token, bookdate)
         resources = resources_future.result()
         my_edges = appointments_future.result()
-    
+    t2 = time.time()
+    logger.info(f"[性能] 获取资源列表+预约记录: {(t2-t1)*1000:.0f}ms")
+
     if not resources:
         return []
-    
+
     my_map = {}
     for e in my_edges:
         n = e.get('node', {})
@@ -613,6 +640,7 @@ def compute_availability_for_date(token, bookdate):
     rid_list = [(r.get('id'), r.get('resources_name')) for r in resources]
     results_map = {}
     # 并发数最多到 15，所有场地同时查询
+    t3 = time.time()
     max_workers = max(1, min(15, len(rid_list)))
     with ThreadPoolExecutor(max_workers=max_workers) as executor:
         future_map = {executor.submit(find_time_slots_by_resource, token, rid, date_ms): (rid, rname) for rid, rname in rid_list}
@@ -624,6 +652,8 @@ def compute_availability_for_date(token, bookdate):
             except Exception:
                 detail = None
             results_map[rid] = (rname, detail)
+    t4 = time.time()
+    logger.info(f"[性能] 获取{len(rid_list)}个场地时间槽: {(t4-t3)*1000:.0f}ms")
 
     out = []
     for rid, (rname, detail) in results_map.items():
@@ -640,6 +670,9 @@ def compute_availability_for_date(token, bookdate):
                     'bookedByMe': booked,
                 })
         out.append({'resources_id': rid, 'resources_name': rname, 'slots': slots})
+
+    t5 = time.time()
+    logger.info(f"[性能] compute_availability_for_date 总耗时: {(t5-t0)*1000:.0f}ms")
     return out
 
 
@@ -870,6 +903,10 @@ _TOKEN_CACHE = {}
 _TOKEN_LOCK = threading.Lock()
 
 def get_token_cached(login_url, captcha_url, username, password, ttl_seconds=900):
+    import logging
+    logger = logging.getLogger(__name__)
+    t0 = time.time()
+
     now = time.time()
     tokens_cached = None
     with _TOKEN_LOCK:
@@ -878,15 +915,22 @@ def get_token_cached(login_url, captcha_url, username, password, ttl_seconds=900
             tokens_cached = entry["tokens"]
     if tokens_cached:
         _cache_profile_from_tokens(tokens_cached)
+        logger.info(f"[性能] Token 缓存命中: {(time.time()-t0)*1000:.0f}ms")
         return tokens_cached
 
+    logger.info("[性能] Token 缓存未命中，开始登录...")
+    t1 = time.time()
     tokens = login_with_retry(login_url, captcha_url, username, password, max_retries=5)
+    t2 = time.time()
+    logger.info(f"[性能] CAS 登录耗时: {(t2-t1)*1000:.0f}ms")
+
     if not tokens or not tokens.get("access_token"):
         return None
 
     with _TOKEN_LOCK:
         _TOKEN_CACHE[username] = {"tokens": tokens, "ts": now}
     _cache_profile_from_tokens(tokens)
+    logger.info(f"[性能] get_token_cached 总耗时: {(time.time()-t0)*1000:.0f}ms")
     return tokens
 
 

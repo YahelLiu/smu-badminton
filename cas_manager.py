@@ -13,13 +13,11 @@ import threading
 from typing import Any, Dict, Tuple, List
 import time
 import uuid
-import os
-import sqlite3
 import logging
 
 # 导入核心工具模块
 from core_utils import (
-    DatabasePool,
+    get_db_pool,
     DatabaseError,
     handle_errors,
     db_operation,
@@ -43,26 +41,20 @@ class BookingJob:
 class BookingManager:
     """
     预约任务管理器：负责创建、跟踪、终止任务
-    
+
     改进说明：
-    - 使用线程安全的数据库连接池（DatabasePool）
+    - 使用统一的全局数据库连接池（get_db_pool）
     - 使用统一的错误处理装饰器
     - 结构化日志记录
     """
     def __init__(self) -> None:
         self._jobs: Dict[str, BookingJob] = {}
         self._lock = threading.Lock()
-        
-        # 确保数据库目录存在
-        script_dir = os.path.dirname(os.path.abspath(__file__))
-        db_dir = os.path.join(script_dir, "data")
-        os.makedirs(db_dir, exist_ok=True)
-        
-        # 使用新的数据库连接池（线程安全）
-        self._db_path = os.path.join(db_dir, "data.db")
-        self._db_pool = DatabasePool(self._db_path, max_retries=3)
-        
-        logger.info(f"预约管理器初始化完成，数据库路径: {self._db_path}")
+
+        # 使用全局数据库连接池
+        self._db_pool = get_db_pool()
+
+        logger.info("预约管理器初始化完成")
 
     @handle_errors(default_return=[], log_error=True, error_message="获取任务列表失败")
     def list_jobs(self) -> List[Dict[str, Any]]:
@@ -185,6 +177,27 @@ class BookingManager:
                 (username, bookdate, kssj, jssj, resources_name),
             )
         logger.debug(f"本地预约记录已删除: {username} - {bookdate} {kssj}-{jssj}")
+
+    def _cleanup_job(self, job_id: str, status: str, *, username: str, bookdate: str, kssj: str, jssj: str, resources_name: str):
+        """
+        统一的任务清理方法
+
+        Args:
+            job_id: 任务ID
+            status: 最终状态 (cancelled/failed/skipped/done)
+            username, bookdate, kssj, jssj, resources_name: 用于删除本地预约记录
+        """
+        try:
+            self._update_job_row_status(job_id, status)
+            self._delete_local_booking(
+                username=username,
+                bookdate=bookdate,
+                kssj=kssj,
+                jssj=jssj,
+                resources_name=resources_name
+            )
+        except Exception as e:
+            logger.warning(f"清理任务失败: {job_id}, {e}")
 
     @db_operation
     def _cancel_scheduled_by_params(self, *, username: str, bookdate: str, kssj: str, jssj: str, resources_name: str) -> int:
@@ -465,53 +478,20 @@ class BookingManager:
                 else:
                     time.sleep(1)
             if cancel_event.is_set():
-                try:
-                    self._update_job_row_status(job_id, "cancelled")
-                    # 删除local_bookings记录
-                    self._delete_local_booking(
-                        username=username,
-                        bookdate=bookdate,
-                        kssj=kssj,
-                        jssj=jssj,
-                        resources_name=resources_name
-                    )
-                except Exception:
-                    pass
+                self._cleanup_job(job_id, "cancelled", username=username, bookdate=bookdate, kssj=kssj, jssj=jssj, resources_name=resources_name)
                 return
 
             # 登录
             tokens = get_token_cached(login_url, captcha_url, username, password, ttl_seconds=900)
             if not tokens or not tokens.get("access_token"):
-                try:
-                    self._update_job_row_status(job_id, "failed")
-                    # 删除local_bookings记录
-                    self._delete_local_booking(
-                        username=username,
-                        bookdate=bookdate,
-                        kssj=kssj,
-                        jssj=jssj,
-                        resources_name=resources_name
-                    )
-                except Exception:
-                    pass
+                self._cleanup_job(job_id, "failed", username=username, bookdate=bookdate, kssj=kssj, jssj=jssj, resources_name=resources_name)
                 return
             access_token = tokens["access_token"]
 
             # 限制：同一用户同一天只能预约一次
             try:
                 if list_appointments_for_account(access_token, bookdate):
-                    try:
-                        self._update_job_row_status(job_id, "skipped")
-                        # 删除local_bookings记录
-                        self._delete_local_booking(
-                            username=username,
-                            bookdate=bookdate,
-                            kssj=kssj,
-                            jssj=jssj,
-                            resources_name=resources_name
-                        )
-                    except Exception:
-                        pass
+                    self._cleanup_job(job_id, "skipped", username=username, bookdate=bookdate, kssj=kssj, jssj=jssj, resources_name=resources_name)
                     return
             except Exception:
                 pass
@@ -519,18 +499,7 @@ class BookingManager:
             # 预取资源/时间段
             result = fetch_resource_time_id(access_token, bookdate, resources_name, kssj, jssj)
             if not result:
-                try:
-                    self._update_job_row_status(job_id, "failed")
-                    # 删除local_bookings记录
-                    self._delete_local_booking(
-                        username=username,
-                        bookdate=bookdate,
-                        kssj=kssj,
-                        jssj=jssj,
-                        resources_name=resources_name
-                    )
-                except Exception:
-                    pass
+                self._cleanup_job(job_id, "failed", username=username, bookdate=bookdate, kssj=kssj, jssj=jssj, resources_name=resources_name)
                 return
             resource_id, time_id = result
 
@@ -556,18 +525,7 @@ class BookingManager:
                     else:
                         time.sleep(1)
                 if cancel_event.is_set():
-                    try:
-                        self._update_job_row_status(job_id, "cancelled")
-                        # 删除local_bookings记录
-                        self._delete_local_booking(
-                            username=username,
-                            bookdate=bookdate,
-                            kssj=kssj,
-                            jssj=jssj,
-                            resources_name=resources_name
-                        )
-                    except Exception:
-                        pass
+                    self._cleanup_job(job_id, "cancelled", username=username, bookdate=bookdate, kssj=kssj, jssj=jssj, resources_name=resources_name)
                     return
                 barrier.wait()
                 resp = make_appointment(access_token, time_id, resource_id, bookdate, kssj, jssj)

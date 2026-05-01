@@ -30,6 +30,7 @@ logger.info(f"项目根目录: {BASE_DIR}")
 from cas_manager import book_badminton_slot, schedule_booking, booking_manager
 from cas_login_requests import login_with_retry, compute_availability_for_date, get_token_cached, clear_token_cache
 from config import get_frontend_config, CAS_LOGIN_URL, CAS_CAPTCHA_URL
+from core_utils import get_db_pool, init_db_tables, close_db_pool
 from datetime import datetime, timezone, timedelta
 _JOB_RETENTION_SEC = int(os.getenv("JOB_RETENTION_SEC", "3600"))  # 已完成任务保留时长，默认1小时
 try:
@@ -106,13 +107,15 @@ class StopJobRequest(BaseModel):
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    # 启动阶段：恢复未完成的定时任务
+    # 启动阶段：初始化数据库表
+    init_db_tables()
+    # 恢复未完成的定时任务
     try:
         booking_manager.load_pending_jobs()
         logger.info("成功加载待处理任务")
     except Exception as e:
         logger.warning(f"加载待处理任务失败: {e}")
-    
+
     _cleanup_task = asyncio.create_task(_availability_cleanup())
     _lock_cleanup_task = asyncio.create_task(_locks_cleanup())
     _jobs_cleanup_task = asyncio.create_task(_jobs_cleanup())
@@ -123,7 +126,7 @@ async def lifespan(app: FastAPI):
         _lock_cleanup_task.cancel()
         _jobs_cleanup_task.cancel()
         # 关闭数据库连接池
-        _close_db_pool()
+        close_db_pool()
 
 
 if _DefaultResponse:
@@ -250,13 +253,11 @@ async def _jobs_cleanup():
         try:
             await asyncio.sleep(3600)  # 每60分钟清理一次
             cutoff = _time.time() - float(_JOB_RETENTION_SEC)
-            with _db_lock:
-                conn = _get_db_connection()
+            with get_db_pool().get_connection() as conn:
                 cur = conn.execute(
                     f"DELETE FROM scheduled_jobs WHERE status IN ({','.join(['?']*len(statuses))}) AND created_at < ?",
                     (*statuses, cutoff),
                 )
-                conn.commit()
                 deleted = cur.rowcount if cur.rowcount is not None else 0
             if deleted:
                 logger.info(f"清理历史任务: 删除 {deleted} 条超过保留期({_JOB_RETENTION_SEC}s) 的记录")
@@ -514,13 +515,11 @@ async def api_book(req: BookRequest) -> BookResponse:
     async with lock:
         # 并发验证：先尝试插入本地预约记录，利用UNIQUE约束防止重复预约
         try:
-            with _db_lock:
-                conn = _get_db_connection()
+            with get_db_pool().get_connection() as conn:
                 conn.execute(
                     "INSERT INTO local_bookings (username, bookdate, resources_name, kssj, jssj, created_at) VALUES (?,?,?,?,?,?)",
                     (req.username, req.bookdate, req.resources_name, req.kssj, req.jssj, _time.time()),
                 )
-                conn.commit()
         except sqlite3.IntegrityError:
             # UNIQUE约束失败，说明该资源已被其他用户预约
             return BookResponse(ok=False, error="resource_already_booked")
@@ -543,13 +542,11 @@ async def api_book(req: BookRequest) -> BookResponse:
         if not result.get("ok"):
             # 预约失败，删除本地记录
             try:
-                with _db_lock:
-                    conn = _get_db_connection()
+                with get_db_pool().get_connection() as conn:
                     conn.execute(
                         "DELETE FROM local_bookings WHERE username=? AND bookdate=? AND resources_name=? AND kssj=? AND jssj=?",
                         (req.username, req.bookdate, req.resources_name, req.kssj, req.jssj),
                     )
-                    conn.commit()
             except Exception as e:
                 logger.warning(f"删除失败的本地预约记录失败: {e}")
             return BookResponse(ok=False, error=result.get("error") or "unknown_error")
@@ -582,13 +579,11 @@ async def api_book_schedule(req: ScheduleRequest, background_tasks: BackgroundTa
 
     # 并发验证：先尝试插入本地预约记录，利用UNIQUE约束防止重复预约
     try:
-        with _db_lock:
-            conn = _get_db_connection()
+        with get_db_pool().get_connection() as conn:
             conn.execute(
                 "INSERT INTO local_bookings (username, bookdate, resources_name, kssj, jssj, created_at) VALUES (?,?,?,?,?,?)",
                 (req.username, req.bookdate, req.resources_name, req.kssj, req.jssj, _time.time()),
             )
-            conn.commit()
     except sqlite3.IntegrityError:
         # UNIQUE约束失败，说明该资源已被其他用户预约
         return ScheduleResponse(ok=False, error="resource_already_booked")
@@ -641,107 +636,15 @@ async def api_schedule_status(job_id: str):
         return {"ok": True, "data": job}
 
 
-# 使用SQLite持久化本地预约记录（连接池模式）
-DB_PATH = os.path.join(os.path.dirname(__file__), "data", "data.db")
-_db_lock = threading.Lock()
-_db_pool: Optional[sqlite3.Connection] = None
-_db_pool_lock = threading.Lock()
-
-def _get_db_connection() -> sqlite3.Connection:
-    """获取数据库连接（单例模式，复用连接）"""
-    global _db_pool
-    with _db_pool_lock:
-        if _db_pool is None:
-            # 确保数据库目录存在
-            db_dir = os.path.dirname(DB_PATH)
-            os.makedirs(db_dir, exist_ok=True)
-            
-            _db_pool = sqlite3.connect(DB_PATH, check_same_thread=False)
-            _db_pool.execute("PRAGMA journal_mode=WAL;")
-            _db_pool.execute("PRAGMA synchronous=NORMAL;")
-            _db_pool.execute("PRAGMA busy_timeout=2000;")
-            logger.info("数据库连接已创建")
-        return _db_pool
-
-def _close_db_pool():
-    """关闭数据库连接池"""
-    global _db_pool
-    with _db_pool_lock:
-        if _db_pool:
-            _db_pool.close()
-            _db_pool = None
-            logger.info("数据库连接已关闭")
-
-def _init_db():
-    """统一初始化所有数据库表"""
-    with _db_lock:
-        conn = _get_db_connection()
-        
-        # 创建本地预约记录表
-        conn.execute(
-            """
-            CREATE TABLE IF NOT EXISTS local_bookings (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                username TEXT NOT NULL,
-                bookdate TEXT NOT NULL,
-                resources_name TEXT NOT NULL,
-                kssj TEXT NOT NULL,
-                jssj TEXT NOT NULL,
-                created_at REAL NOT NULL,
-                UNIQUE(bookdate, resources_name, kssj, jssj)
-            );
-            """
-        )
-        conn.execute(
-            "CREATE INDEX IF NOT EXISTS idx_local_bookings_bookdate ON local_bookings(bookdate);"
-        )
-        conn.execute(
-            "CREATE INDEX IF NOT EXISTS idx_local_bookings_comp ON local_bookings(username, bookdate, kssj, jssj, resources_name);"
-        )
-        
-        # 创建定时任务表
-        conn.execute(
-            """
-            CREATE TABLE IF NOT EXISTS scheduled_jobs (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                job_id TEXT NOT NULL,
-                login_url TEXT,
-                captcha_url TEXT,
-                username TEXT,
-                password TEXT,
-                bookdate TEXT,
-                kssj TEXT,
-                jssj TEXT,
-                resources_name TEXT,
-                target_time_str TEXT,
-                num_threads INTEGER,
-                status TEXT,
-                created_at REAL NOT NULL
-            );
-            """
-        )
-        conn.execute("CREATE INDEX IF NOT EXISTS idx_jobs_status ON scheduled_jobs(status);")
-        conn.execute("CREATE INDEX IF NOT EXISTS idx_jobs_created ON scheduled_jobs(created_at);")
-        conn.execute(
-            "CREATE INDEX IF NOT EXISTS idx_jobs_params ON scheduled_jobs(username, bookdate, kssj, jssj, resources_name);"
-        )
-        
-        conn.commit()
-        logger.info("数据库表初始化完成")
-
-_init_db()
-
 @app.post("/api/local_bookings")
 async def api_save_local_booking(req: LocalBookingRequest):
     """保存本地预约记录（已废弃，预约时会自动插入）"""
     try:
-        with _db_lock:
-            conn = _get_db_connection()
+        with get_db_pool().get_connection() as conn:
             conn.execute(
                 "INSERT INTO local_bookings (username, bookdate, resources_name, kssj, jssj, created_at) VALUES (?,?,?,?,?,?)",
                 (req.username, req.bookdate, req.resources_name, req.kssj, req.jssj, _time.time()),
             )
-            conn.commit()
     except sqlite3.IntegrityError:
         return {"ok": False, "error": "resource_already_booked"}
     except Exception as e:
@@ -757,8 +660,7 @@ async def api_list_local_bookings(bookdate: str, response: Response, limit: Opti
         beijing_tz = timezone(timedelta(hours=8))
         now_dt = datetime.now(beijing_tz)
         if clean:
-            with _db_lock:
-                conn = _get_db_connection()
+            with get_db_pool().get_connection() as conn:
                 cur = conn.execute(
                     "SELECT id, kssj, jssj FROM local_bookings WHERE bookdate = ?",
                     (bookdate,),
@@ -773,14 +675,12 @@ async def api_list_local_bookings(bookdate: str, response: Response, limit: Opti
                         continue
                 if to_delete:
                     conn.executemany("DELETE FROM local_bookings WHERE id = ?", [(i,) for i in to_delete])
-                    conn.commit()
                     logger.info(f"清理了 {len(to_delete)} 条过期预约记录")
     except Exception as e:
         logger.warning(f"清理过期记录失败: {e}")
 
     t1 = _time.perf_counter()
-    with _db_lock:
-        conn = _get_db_connection()
+    with get_db_pool().get_connection() as conn:
         if limit is not None:
             cur = conn.execute(
                 "SELECT username, bookdate, resources_name, kssj, jssj, created_at FROM local_bookings WHERE bookdate = ? ORDER BY created_at DESC LIMIT ? OFFSET ?",
@@ -1012,8 +912,9 @@ async def api_logout(req: LogoutRequest):
 
 # 静态文件挂载（必须放在所有路由之后）
 try:
-    app.mount("/static", StaticFiles(directory=BASE_DIR), name="static")
-    logger.info(f"静态文件目录: {BASE_DIR}")
+    static_dir = os.path.join(BASE_DIR, "static")
+    app.mount("/static", StaticFiles(directory=static_dir), name="static")
+    logger.info(f"静态文件目录: {static_dir}")
 except Exception as e:
     logger.warning(f"静态文件挂载失败: {e}")
 

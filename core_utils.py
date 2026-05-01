@@ -9,6 +9,7 @@
 """
 
 import logging
+import os
 import sqlite3
 import threading
 import time
@@ -321,6 +322,100 @@ def retry_on_error(max_retries: int = 3, delay: float = 0.5, exceptions: tuple =
     return decorator
 
 
+# ============= 全局数据库连接池单例 =============
+
+_db_pool_instance: Optional['DatabasePool'] = None
+_db_pool_lock = threading.Lock()
+
+
+def get_db_pool(db_path: str = None) -> 'DatabasePool':
+    """
+    获取全局数据库连接池单例
+
+    Args:
+        db_path: 数据库路径，默认为 data/data.db
+
+    Returns:
+        DatabasePool 实例
+    """
+    global _db_pool_instance
+    with _db_pool_lock:
+        if _db_pool_instance is None:
+            if db_path is None:
+                base_dir = os.path.dirname(os.path.abspath(__file__))
+                db_path = os.path.join(base_dir, "data", "data.db")
+            # 确保目录存在
+            os.makedirs(os.path.dirname(db_path), exist_ok=True)
+            _db_pool_instance = DatabasePool(db_path)
+        return _db_pool_instance
+
+
+def init_db_tables():
+    """初始化所有数据库表"""
+    pool = get_db_pool()
+    with pool.get_connection() as conn:
+        # 创建本地预约记录表
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS local_bookings (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                username TEXT NOT NULL,
+                bookdate TEXT NOT NULL,
+                resources_name TEXT NOT NULL,
+                kssj TEXT NOT NULL,
+                jssj TEXT NOT NULL,
+                created_at REAL NOT NULL,
+                UNIQUE(bookdate, resources_name, kssj, jssj)
+            );
+            """
+        )
+        conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_local_bookings_bookdate ON local_bookings(bookdate);"
+        )
+        conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_local_bookings_comp ON local_bookings(username, bookdate, kssj, jssj, resources_name);"
+        )
+
+        # 创建定时任务表
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS scheduled_jobs (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                job_id TEXT NOT NULL,
+                login_url TEXT,
+                captcha_url TEXT,
+                username TEXT,
+                password TEXT,
+                bookdate TEXT,
+                kssj TEXT,
+                jssj TEXT,
+                resources_name TEXT,
+                target_time_str TEXT,
+                num_threads INTEGER,
+                status TEXT,
+                created_at REAL NOT NULL
+            );
+            """
+        )
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_jobs_status ON scheduled_jobs(status);")
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_jobs_created ON scheduled_jobs(created_at);")
+        conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_jobs_params ON scheduled_jobs(username, bookdate, kssj, jssj, resources_name);"
+        )
+
+    logger.info("数据库表初始化完成")
+
+
+def close_db_pool():
+    """关闭全局数据库连接池"""
+    global _db_pool_instance
+    with _db_pool_lock:
+        if _db_pool_instance:
+            _db_pool_instance.close_all()
+            _db_pool_instance = None
+            logger.info("全局数据库连接池已关闭")
+
+
 # ============= 使用示例（注释） =============
 
 """
@@ -335,10 +430,15 @@ def get_user_bookings(user_id: str):
     # 这里的异常会被自动捕获和记录
     return fetch_from_db(user_id)
 
-# 3. 使用数据库连接池
-db_pool = DatabasePool("data/data.db")
+# 3. 使用全局数据库连接池
+from core_utils import get_db_pool, init_db_tables
 
-with db_pool.get_connection() as conn:
+# 启动时初始化表
+init_db_tables()
+
+# 使用连接池
+pool = get_db_pool()
+with pool.get_connection() as conn:
     conn.execute("INSERT INTO bookings VALUES (?, ?)", (user_id, date))
 
 # 4. 使用重试装饰器

@@ -5,3 +5,4 @@ __pycache__/
 .idea/
 wf.shmtu.edu.cn.har
 model/
+data/
