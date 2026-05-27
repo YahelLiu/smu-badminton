@@ -419,6 +419,7 @@ def close_db_pool():
 # ============= 密码混淆工具 =============
 
 import base64
+from .config import SECRET_KEY
 
 def obfuscate_password(password: str) -> str:
     """
@@ -433,7 +434,7 @@ def obfuscate_password(password: str) -> str:
     """
     if not password:
         return ""
-    key = os.getenv("SECRET_KEY", "smu-badminton-default-key")
+    key = SECRET_KEY
     # XOR + base64
     encoded = ''.join(chr(ord(c) ^ ord(key[i % len(key)])) for i, c in enumerate(password))
     return base64.b64encode(encoded.encode()).decode()
@@ -451,7 +452,7 @@ def deobfuscate_password(obfuscated: str) -> str:
     """
     if not obfuscated:
         return ""
-    key = os.getenv("SECRET_KEY", "smu-badminton-default-key")
+    key = SECRET_KEY
     try:
         decoded = base64.b64decode(obfuscated.encode()).decode()
         return ''.join(chr(ord(c) ^ ord(key[i % len(key)])) for i, c in enumerate(decoded))
@@ -475,7 +476,7 @@ def get_user_bookings(user_id: str):
     return fetch_from_db(user_id)
 
 # 3. 使用全局数据库连接池
-from core_utils import get_db_pool, init_db_tables
+from .core_utils import get_db_pool, init_db_tables
 
 # 启动时初始化表
 init_db_tables()

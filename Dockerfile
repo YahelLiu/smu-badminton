@@ -50,10 +50,17 @@ RUN pip install --no-cache-dir \
 RUN pip install --no-cache-dir -r requirements.txt || true
 
 # 复制应用代码
-COPY . .
+COPY src/ /app/src/
+COPY model/ /app/model/
+COPY templates/ /app/templates/
+COPY static/ /app/static/
+COPY .env /app/.env
+
+# 安装为可编辑包
+RUN pip install --no-cache-dir -e .
 
 # 确保必要的目录存在
-RUN mkdir -p /app/data /app/templates /app/model
+RUN mkdir -p /app/data
 
 # 暴露端口
 EXPOSE 5000
@@ -63,4 +70,4 @@ HEALTHCHECK --interval=30s --timeout=10s --start-period=5s --retries=3 \
     CMD python -c "import urllib.request; urllib.request.urlopen('http://localhost:5000/health', timeout=5)" || exit 1
 
 # 启动命令
-CMD ["python", "server_fastapi.py"]
+CMD ["python", "-m", "smu_badminton.server_fastapi"]

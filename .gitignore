@@ -3,7 +3,9 @@ __pycache__/
 *.pyc
 .env
 .idea/
-wf.shmtu.edu.cn.har
+*.har
 model/
 data/
 .claude/
+*.egg-info/
+docs/

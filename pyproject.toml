@@ -1,0 +1,46 @@
+[build-system]
+requires = ["setuptools>=61.0", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "smu-badminton"
+version = "1.0.0"
+description = "SMU Badminton Court Booking System"
+readme = "README.md"
+requires-python = ">=3.11"
+license = {text = "MIT"}
+
+dependencies = [
+    "fastapi==0.116.1",
+    "uvicorn==0.35.0",
+    "starlette==0.47.3",
+    "pydantic==2.11.9",
+    "python-dotenv==1.1.1",
+    "requests==2.32.4",
+    "beautifulsoup4==4.13.4",
+    "lxml==6.0.0",
+    "pillow==11.3.0",
+    "opencv-python==4.12.0.88",
+    "ncnn==1.0.20250503",
+    "numpy==2.2.6",
+    "tqdm==4.67.1",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=7.0",
+    "pytest-asyncio>=0.21",
+    "pytest-cov>=4.0",
+    "httpx>=0.24",
+]
+
+[project.scripts]
+smu-badminton = "smu_badminton.server_fastapi:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+python_files = ["test_*.py"]
+asyncio_mode = "auto"

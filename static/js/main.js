@@ -103,6 +103,15 @@ const Auth = {
     },
     clear() {
         try { localStorage.removeItem('bb_auth'); } catch(e) {}
+    },
+    saveToken(token) {
+        try { localStorage.setItem('bb_token', token); } catch(e) {}
+    },
+    loadToken() {
+        try { return localStorage.getItem('bb_token'); } catch(e) { return null; }
+    },
+    clearToken() {
+        try { localStorage.removeItem('bb_token'); } catch(e) {}
     }
 };
 
@@ -241,6 +250,7 @@ function initDate() {
 // ============ 获取并渲染预约数据 ============
 window.fetchAndRenderBookings = async function(forceRefresh = false) {
     const date = Elements.dateInput.value;
+    console.log('fetchAndRenderBookings - date:', date);
     if (!window.__auth) {
         const ok = await promptLogin();
         if (!ok) {
@@ -273,19 +283,37 @@ window.fetchAndRenderBookings = async function(forceRefresh = false) {
         // 如果没有缓存，从服务器获取
         if (!data) {
             console.log('发送 availability 请求...');
-            setLoading(true, '正在登录...');
+            setLoading(true, '正在获取场地数据...');
+
+            // 获取 token
+            const token = window.__token || Auth.loadToken();
+            console.log('Token 状态:', token ? '存在' : '不存在', 'window.__token:', window.__token ? '有' : '无', 'localStorage:', Auth.loadToken() ? '有' : '无');
+            if (!token) {
+                // 没有 token，需要重新登录
+                Elements.statusText.textContent = '需要登录';
+                Toast.error('登录过期', '请重新登录');
+                Auth.clear();
+                Auth.clearToken();
+                window.__auth = null;
+                window.__token = null;
+                renderCurrentUsername();
+                AvailabilityCache.clear();
+                const ok = await promptLogin();
+                if (ok) {
+                    return fetchAndRenderBookings(true);
+                }
+                return;
+            }
+
             const resp = await fetch('/api/availability', {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
                 body: JSON.stringify({
-                    login_url: window.login_url,
-                    captcha_url: window.captcha_url,
-                    username: window.__auth.username,
-                    password: window.__auth.password,
+                    token: token,
                     bookdate: date
                 })
             });
-            setLoading(true, '正在获取场地数据...');
+            console.log('请求体:', JSON.stringify({ token: token?.substring(0, 20) + '...', bookdate: date }));
             data = await resp.json();
             console.log('availability 响应:', data);
 
@@ -419,6 +447,90 @@ async function pollJobs() {
 }
 
 // ============ 登录弹窗 ============
+let _captchaSessionId = null;
+
+async function fetchCaptchaImage() {
+    // 获取验证码图片
+    try {
+        const resp = await fetch('/api/captcha', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+                login_url: window.login_url,
+                captcha_url: window.captcha_url
+            })
+        });
+        const data = await resp.json();
+        if (data.ok && data.data) {
+            _captchaSessionId = data.data.session_id;
+            return data.data.captcha_image;
+        }
+        return null;
+    } catch (e) {
+        console.error('获取验证码失败:', e);
+        return null;
+    }
+}
+
+function showLoginError(message) {
+    const errorEl = document.getElementById('login-error');
+    if (errorEl) {
+        errorEl.textContent = message;
+        errorEl.style.display = 'block';
+    }
+}
+
+function hideLoginError() {
+    const errorEl = document.getElementById('login-error');
+    if (errorEl) {
+        errorEl.style.display = 'none';
+    }
+}
+
+function showCaptchaField() {
+    const captchaField = document.getElementById('captcha-field');
+    if (captchaField) {
+        captchaField.style.display = 'block';
+    }
+}
+
+function hideCaptchaField() {
+    const captchaField = document.getElementById('captcha-field');
+    if (captchaField) {
+        captchaField.style.display = 'none';
+    }
+    const captchaInput = document.getElementById('login-captcha');
+    if (captchaInput) {
+        captchaInput.value = '';
+    }
+}
+
+async function performLogin(username, password, captchaCode = null) {
+    // 执行登录请求
+    try {
+        const body = {
+            login_url: window.login_url,
+            captcha_url: window.captcha_url,
+            username,
+            password,
+            captcha_code: captchaCode
+        };
+        // 如果有验证码会话ID，传递给后端以复用session
+        if (captchaCode && _captchaSessionId) {
+            body.session_id = _captchaSessionId;
+        }
+        const resp = await fetch('/api/login', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify(body)
+        });
+        return await resp.json();
+    } catch (e) {
+        console.error('登录请求失败:', e);
+        return { ok: false, error: e.message, error_type: 'network_error' };
+    }
+}
+
 function promptLogin() {
     return new Promise(resolve => {
         const dlg = Elements.loginDialog;
@@ -427,6 +539,11 @@ function promptLogin() {
         const pEl = document.getElementById('login-password');
         const cancelBtn = document.getElementById('login-cancel');
         const togglePwd = document.getElementById('togglePwd');
+        const captchaImg = document.getElementById('captcha-image');
+        const captchaInput = document.getElementById('login-captcha');
+        const submitBtn = document.getElementById('login-submit');
+        const titleEl = document.getElementById('login-dialog-title');
+
         if (!dlg || !form || !uEl || !pEl || !cancelBtn || !togglePwd) {
             resolve(false);
             return;
@@ -448,15 +565,37 @@ function promptLogin() {
             }
         };
 
+        const resetDialog = () => {
+            hideLoginError();
+            hideCaptchaField();
+            if (titleEl) titleEl.textContent = '🔐 登录';
+            if (submitBtn) submitBtn.textContent = '登录';
+            _captchaSessionId = null;
+        };
+
         togglePwd.onclick = () => {
             const isPwd = pEl.type === 'password';
             pEl.type = isPwd ? 'text' : 'password';
             togglePwd.textContent = isPwd ? '隐藏' : '显示';
         };
 
-        cancelBtn.onclick = () => { closeDialog(); resolve(false); };
+        // 验证码图片点击刷新
+        if (captchaImg) {
+            captchaImg.onclick = async () => {
+                const img = await fetchCaptchaImage();
+                if (img) {
+                    captchaImg.src = img;
+                }
+            };
+        }
 
-        form.onsubmit = (e) => {
+        cancelBtn.onclick = () => {
+            resetDialog();
+            closeDialog();
+            resolve(false);
+        };
+
+        form.onsubmit = async (e) => {
             e.preventDefault();
             const u = (uEl.value || '').trim();
             const p = (pEl.value || '').trim();
@@ -464,11 +603,74 @@ function promptLogin() {
                 Toast.error('登录失败', '请输入学号与密码');
                 return;
             }
-            window.__auth = { username: u, password: p };
-            Auth.save(window.__auth);
-            renderCurrentUsername();
-            closeDialog();
-            resolve(true);
+
+            // 检查是否需要手动输入验证码
+            const captchaField = document.getElementById('captcha-field');
+            const needManualCaptcha = captchaField && captchaField.style.display !== 'none';
+            const captchaCode = needManualCaptcha && captchaInput ? captchaInput.value.trim() : null;
+
+            if (needManualCaptcha && !captchaCode) {
+                Toast.error('登录失败', '请输入验证码');
+                return;
+            }
+
+            // 禁用提交按钮，显示加载状态
+            if (submitBtn) {
+                submitBtn.disabled = true;
+                submitBtn.textContent = '登录中...';
+            }
+
+            try {
+                // 执行登录
+                const result = await performLogin(u, p, captchaCode);
+
+                if (result.ok) {
+                    // 登录成功，保存 token
+                    window.__auth = { username: u, password: p };
+                    window.__token = result.data?.access_token;
+                    console.log('登录成功, token:', window.__token ? '已获取' : '未获取');
+                    Auth.save(window.__auth);
+                    if (window.__token) {
+                        Auth.saveToken(window.__token);
+                    }
+                    renderCurrentUsername();
+                    resetDialog();
+                    closeDialog();
+                    resolve(true);
+                } else if (result.need_manual_captcha) {
+                    // 需要手动输入验证码
+                    showCaptchaField();
+                    const img = await fetchCaptchaImage();
+                    if (img && captchaImg) {
+                        captchaImg.src = img;
+                    }
+                    showLoginError('验证码识别失败，请手动输入');
+                    if (titleEl) titleEl.textContent = '🔐 登录 (验证码)';
+                } else if (result.error_type === 'password_error') {
+                    // 密码错误
+                    showLoginError('用户名或密码错误');
+                    if (titleEl) titleEl.textContent = '🔐 登录 (密码错误)';
+                } else if (result.error_type === 'captcha_error') {
+                    // 验证码错误（手动输入后仍然错误）
+                    showLoginError('验证码错误，请重新输入');
+                    // 刷新验证码图片
+                    const img = await fetchCaptchaImage();
+                    if (img && captchaImg) {
+                        captchaImg.src = img;
+                    }
+                    if (captchaInput) captchaInput.value = '';
+                } else {
+                    // 其他错误
+                    showLoginError(result.error || '登录失败');
+                }
+            } catch (err) {
+                showLoginError(err.message || '登录请求失败');
+            } finally {
+                if (submitBtn) {
+                    submitBtn.disabled = false;
+                    submitBtn.textContent = '登录';
+                }
+            }
         };
 
         // 预填缓存
@@ -478,6 +680,7 @@ function promptLogin() {
             pEl.value = cached.password || '';
         }
 
+        resetDialog();
         openDialog();
     });
 }
@@ -703,7 +906,9 @@ function bindEvents() {
 
         // 清除前端缓存
         Auth.clear();
+        Auth.clearToken();
         window.__auth = null;
+        window.__token = null;
         renderCurrentUsername();
         AvailabilityCache.clear();
         document.querySelectorAll('.hour-cell').forEach(cell => {
@@ -752,8 +957,10 @@ async function init() {
 
     // 尝试使用缓存登录
     const cached = Auth.load();
-    if (cached && cached.username && cached.password) {
+    const cachedToken = Auth.loadToken();
+    if (cached && cached.username && cached.password && cachedToken) {
         window.__auth = cached;
+        window.__token = cachedToken;
     } else {
         const ok = await promptLogin();
         if (!ok) {
@@ -777,3 +984,4 @@ async function init() {
 
 // 启动
 document.addEventListener('DOMContentLoaded', init);
+// cache bust: 1779900696

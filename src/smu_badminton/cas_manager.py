@@ -1,6 +1,6 @@
 import typing as t
 
-from cas_login_requests import (
+from .cas_login_requests import (
     login_with_retry,
     get_token_cached,
     fetch_resource_time_id,
@@ -16,7 +16,7 @@ import uuid
 import logging
 
 # 导入核心工具模块
-from core_utils import (
+from .core_utils import (
     get_db_pool,
     DatabaseError,
     handle_errors,

@@ -163,7 +163,7 @@
     <!-- 登录弹窗 -->
     <dialog id="login-dialog">
         <div class="dialog-header">
-            <h3 class="dialog-title">🔐 登录</h3>
+            <h3 class="dialog-title" id="login-dialog-title">🔐 登录</h3>
         </div>
         <form id="login-form">
             <div class="dialog-body">
@@ -179,15 +179,26 @@
                             <button type="button" class="toggle-password" id="togglePwd">显示</button>
                         </div>
                     </div>
+                    <!-- 验证码区域（默认隐藏） -->
+                    <div class="login-field" id="captcha-field" style="display: none;">
+                        <label for="login-captcha">验证码</label>
+                        <div class="captcha-container">
+                            <input type="text" id="login-captcha" class="login-input captcha-input" placeholder="请输入验证码" maxlength="4">
+                            <img id="captcha-image" class="captcha-image" src="" alt="验证码" title="点击刷新">
+                        </div>
+                        <div class="captcha-hint">验证码错误，请手动输入</div>
+                    </div>
+                    <!-- 错误提示区域 -->
+                    <div class="login-error" id="login-error" style="display: none;"></div>
                 </div>
             </div>
             <div class="dialog-footer">
                 <button type="button" class="btn btn-outline" id="login-cancel">取消</button>
-                <button type="submit" class="btn btn-primary">登录</button>
+                <button type="submit" class="btn btn-primary" id="login-submit">登录</button>
             </div>
         </form>
     </dialog>
 
-    <script src="/static/js/main.js"></script>
+    <script src="/static/js/main.js?v=20260528"></script>
 </body>
 </html>
