@@ -28,12 +28,18 @@ from .server_models import (
     MetricsMiddleware, RateLimitMiddleware,
     _acquire_lock, _locks_cleanup,
     _jobs, _jobs_guard,
+    _avail_public_cache, _avail_public_lock, _avail_public_ttl_sec,
     _availability_cache, _availability_locks, _availability_guard, _availability_ttl_sec,
     _availability_cleanup, _get_avail_lock, _convert_to_minimal,
     _metrics, _metrics_lock,
 )
 from .cas_manager import book_badminton_slot, schedule_booking, booking_manager
 from .cas_login_requests import login_with_retry, compute_availability_for_date, get_token_cached, clear_token_cache
+from .cas_login_requests import list_appointments_for_account
+from .booking_api import (
+    list_resources_by_account, _fetch_all_time_slots, _shared_session,
+    _build_my_bookings_map, _merge_bookings,
+)
 from .cas_login import (
     prepare_login_session, login_with_auto_captcha, login_with_manual_captcha,
     attempt_login_with_captcha,
@@ -540,51 +546,66 @@ async def api_list_local_bookings(bookdate: str, response: JSONResponse, limit: 
 
 @app.post("/api/availability", response_model=AvailabilityResponse)
 async def api_availability(req: AvailabilityRequest, request: Request, response: Response) -> AvailabilityResponse:
+    """
+    查询场地可用性。使用公共缓存：场地时间槽数据所有用户共享（60s TTL），
+    仅 bookedByMe 按用户单独查询。
+    """
     t0 = _time.perf_counter()
-    nocache = request.query_params.get("nocache") == "1"
-    minimal = request.query_params.get("min") == "1"
     token = req.token
+    bookdate = req.bookdate
     if not token:
         return AvailabilityResponse(ok=False, error="token_required")
-    cache_key = (token[:20], req.bookdate)  # 用 token 前20字符作为缓存 key
+
+    # 从 token 缓存获取 id_token 和用户名
+    id_token = ""
+    username = ""
+    from .cas_login_requests import _TOKEN_CACHE
+    for uname, entry in _TOKEN_CACHE.items():
+        if entry.get("tokens", {}).get("access_token") == token:
+            id_token = entry["tokens"].get("id_token", "")
+            username = uname
+            break
+
     now = _time.time()
-    t1 = _time.perf_counter()
-    if not nocache:
-        lk = await _get_avail_lock(cache_key)
-        async with lk:
-            entry = _availability_cache.get(cache_key)
-            if entry and now - float(entry.get("ts", 0)) < 30.0:
-                data_cached = entry.get("data") or []
-                if minimal:
-                    out_list = entry.get("data_min") or []
-                    if not out_list:
-                        out_list = _convert_to_minimal(data_cached)
-                        entry["data_min"] = out_list
-                else:
-                    out_list = data_cached
-                t_total = (_time.perf_counter() - t0) * 1000.0
-                response.headers["X-Avail-TokenMs"] = f"{(t1 - t0) * 1000.0:.2f}"
-                response.headers["X-Avail-Cache"] = "HIT"
-                response.headers["X-Avail-ComputeMs"] = "0.00"
-                response.headers["X-Avail-TotalMs"] = f"{t_total:.2f}"
-                response.headers["X-Avail-ListLen"] = str(len(out_list))
-                return AvailabilityResponse(ok=True, data={"list": out_list})
-    data = await run_in_threadpool(compute_availability_for_date, token, req.bookdate)
-    t2 = _time.perf_counter()
-    lk = await _get_avail_lock(cache_key)
-    async with lk:
-        _availability_cache[cache_key] = {"ts": now, "data": data, "data_min": None}
-    out_list = data
-    if minimal:
-        out_list = _convert_to_minimal(data)
-        async with lk:
-            entry = _availability_cache.get(cache_key)
-            if entry:
-                entry["data_min"] = out_list
-    response.headers["X-Avail-TokenMs"] = f"{(t1 - t0) * 1000.0:.2f}"
+
+    # 1. 查公共缓存（场地时间槽数据，所有用户共享）
+    public_entry = _avail_public_cache.get(bookdate)
+    if public_entry and now - public_entry["_ts"] < _avail_public_ttl_sec:
+        # 缓存命中：只需查预约记录（1 个请求），合并 bookedByMe
+        logger.info("[缓存] 公共缓存命中: %s", bookdate)
+        slots_data = public_entry["data"]
+        session = _shared_session()
+        my_edges = await run_in_threadpool(list_appointments_for_account, token, bookdate, id_token, session)
+        my_map = _build_my_bookings_map(my_edges)
+        out_list = _merge_bookings(slots_data, my_map)
+        t_total = (_time.perf_counter() - t0) * 1000.0
+        response.headers["X-Avail-Cache"] = "HIT-PUBLIC"
+        response.headers["X-Avail-TotalMs"] = f"{t_total:.2f}"
+        response.headers["X-Avail-ListLen"] = str(len(out_list))
+        return AvailabilityResponse(ok=True, data={"list": out_list})
+
+    # 2. 公共缓存 MISS：完整查询（资源列表 + 时间槽 + 预约记录）
+    logger.info("[缓存] 公共缓存未命中: %s", bookdate)
+    session = _shared_session()
+    resources = await run_in_threadpool(list_resources_by_account, token, bookdate, None, id_token, "", session)
+
+    if not resources:
+        return AvailabilityResponse(ok=False, error="login_failed")
+
+    slots_data = await run_in_threadpool(_fetch_all_time_slots, token, bookdate, resources, id_token, session)
+
+    # 存入公共缓存
+    async with _avail_public_lock:
+        _avail_public_cache[bookdate] = {"data": slots_data, "_ts": now}
+
+    # 查预约记录，合并 bookedByMe
+    my_edges = await run_in_threadpool(list_appointments_for_account, token, bookdate, id_token, session)
+    my_map = _build_my_bookings_map(my_edges)
+    out_list = _merge_bookings(slots_data, my_map)
+
+    t_total = (_time.perf_counter() - t0) * 1000.0
     response.headers["X-Avail-Cache"] = "MISS"
-    response.headers["X-Avail-ComputeMs"] = f"{(t2 - t1) * 1000.0:.2f}"
-    response.headers["X-Avail-TotalMs"] = f"{(_time.perf_counter() - t0) * 1000.0:.2f}"
+    response.headers["X-Avail-TotalMs"] = f"{t_total:.2f}"
     response.headers["X-Avail-ListLen"] = str(len(out_list))
     return AvailabilityResponse(ok=True, data={"list": out_list})
 
@@ -677,7 +698,7 @@ if __name__ == "__main__":
     uvicorn.run(
         "smu_badminton.server_fastapi:app",
         host="0.0.0.0",
-        port=5002,
+        port=int(os.getenv("SERVER_PORT", "5002")),
         reload=UVICORN_RELOAD,
         proxy_headers=True,
         forwarded_allow_ips="*"

@@ -258,7 +258,7 @@ window.fetchAndRenderBookings = async function(forceRefresh = false) {
             return;
         }
     }
-    const token = ++State.fetchToken;
+    const fetchId = ++State.fetchToken;
     const t0 = performance.now();
 
     // 显示骨架屏
@@ -285,10 +285,10 @@ window.fetchAndRenderBookings = async function(forceRefresh = false) {
             console.log('发送 availability 请求...');
             setLoading(true, '正在获取场地数据...');
 
-            // 获取 token
-            const token = window.__token || Auth.loadToken();
-            console.log('Token 状态:', token ? '存在' : '不存在', 'window.__token:', window.__token ? '有' : '无', 'localStorage:', Auth.loadToken() ? '有' : '无');
-            if (!token) {
+            // 获取 access_token
+            const accessToken = window.__token || Auth.loadToken();
+            console.log('Token 状态:', accessToken ? '存在' : '不存在', 'window.__token:', window.__token ? '有' : '无', 'localStorage:', Auth.loadToken() ? '有' : '无');
+            if (!accessToken) {
                 // 没有 token，需要重新登录
                 Elements.statusText.textContent = '需要登录';
                 Toast.error('登录过期', '请重新登录');
@@ -309,11 +309,11 @@ window.fetchAndRenderBookings = async function(forceRefresh = false) {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
                 body: JSON.stringify({
-                    token: token,
+                    token: accessToken,
                     bookdate: date
                 })
             });
-            console.log('请求体:', JSON.stringify({ token: token?.substring(0, 20) + '...', bookdate: date }));
+            console.log('请求体:', JSON.stringify({ token: accessToken?.substring(0, 20) + '...', bookdate: date }));
             data = await resp.json();
             console.log('availability 响应:', data);
 
@@ -325,7 +325,7 @@ window.fetchAndRenderBookings = async function(forceRefresh = false) {
             console.log('使用前端缓存');
         }
 
-        if (token !== State.fetchToken) return;
+        if (fetchId !== State.fetchToken) return;
 
         // 重置表格（移除骨架屏）
         initTable();
@@ -339,16 +339,14 @@ window.fetchAndRenderBookings = async function(forceRefresh = false) {
         if (!data.ok) {
             console.warn('availability error', data.error, data);
 
-            // 登录失败，需要重新输入账号密码
-            if (data.error === 'login_failed') {
-                Elements.statusText.textContent = '登录失败';
-                Toast.error('登录失败', '账号或密码错误，请重新登录');
-                Auth.clear();
-                window.__auth = null;
-                renderCurrentUsername();
+            // token 过期或登录失败：重新登录
+            if (data.error === 'login_failed' || data.error === 'no_resources' || data.error === 'token_required') {
+                Elements.statusText.textContent = '需要重新登录';
+                Toast.warning('登录过期', '请重新登录');
+                Auth.clearToken();
                 AvailabilityCache.clear();
 
-                // 弹出登录框
+                // 弹出登录框（预填学号密码）
                 const ok = await promptLogin();
                 if (ok) {
                     return fetchAndRenderBookings(true);
@@ -368,7 +366,7 @@ window.fetchAndRenderBookings = async function(forceRefresh = false) {
 
         // 获取本地预约记录
         const others = await localBookingsPromise;
-        if (token !== State.fetchToken) return;
+        if (fetchId !== State.fetchToken) return;
 
         const list = data.data?.list || [];
 
@@ -416,7 +414,7 @@ window.fetchAndRenderBookings = async function(forceRefresh = false) {
         console.error('fetch error', e);
         Elements.statusText.textContent = '连接错误';
     } finally {
-        if (token === State.fetchToken) {
+        if (fetchId === State.fetchToken) {
             setLoading(false);
         }
     }
@@ -979,7 +977,7 @@ async function init() {
     }, 60000);
 
     // 轮询任务状态（10秒）
-    setInterval(pollJobs, 10000);
+    setInterval(pollJobs, 30000);
 }
 
 // 启动

@@ -1,4 +1,4 @@
-# Docker 忽略文件
+# Python
 __pycache__/
 *.py[cod]
 *$py.class
@@ -8,12 +8,6 @@ __pycache__/
 venv/
 ENV/
 env/
-
-# 数据库文件（将通过volume挂载）
-data.db
-data.db-wal
-data.db-shm
-booking.db
 
 # IDE
 .idea/
@@ -25,27 +19,24 @@ booking.db
 .git/
 .gitignore
 
-# Docker相关
+# Docker
 Dockerfile
 docker-compose.yml
-DOCKER_COMMANDS.md
 
 # 测试和文档
 tests/
+docs/
+.claude/
+scripts/
 *.md
-!README.md
 
-# 临时文件
+# 调试和临时文件
 *.log
 *.tmp
-captcha.jpg
+*.har
+captcha.png
 
-# 备份文件
-*_backup.html
-
-# Windows 特定
+# Windows / macOS
 Thumbs.db
 Desktop.ini
-
-# macOS
 .DS_Store

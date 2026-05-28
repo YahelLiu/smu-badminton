@@ -334,11 +334,16 @@ def _append_log(job_id: str, msg: str):
 
 
 # ============= 可用性缓存 =============
+# 公共缓存：key = bookdate，所有用户共享场地时间槽数据
+_avail_public_cache: Dict[str, Dict[str, object]] = {}
+_avail_public_lock = asyncio.Lock()
+_avail_public_ttl_sec = 60.0
 
+# 兼容旧代码的变量（已不使用，但保留导出避免报错）
 _availability_cache: Dict[Tuple[str, str], Dict[str, object]] = {}
 _availability_locks: Dict[Tuple[str, str], asyncio.Lock] = {}
 _availability_guard = asyncio.Lock()
-_availability_ttl_sec = 30.0
+_availability_ttl_sec = 60.0
 
 
 async def _availability_cleanup():

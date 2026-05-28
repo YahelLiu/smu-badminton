@@ -6,13 +6,16 @@ services:
     ports:
       - "5000:5000"
     volumes:
-      # 数据库文件保留在Docker volume中，不同步到本地
+      # 数据库持久化（Docker volume，不同步到本地）
       - smu-badminton-data:/app/data
-      - ./model:/app/model
+      # OCR 模型文件（较大，不打包进镜像）
+      - ./model:/app/model:ro
+      # 环境变量配置
       - ./.env:/app/.env:ro
     environment:
       - TZ=Asia/Shanghai
       - PYTHONUNBUFFERED=1
+      - SERVER_PORT=5000
     healthcheck:
       test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:5000/health', timeout=5)"]
       interval: 30s

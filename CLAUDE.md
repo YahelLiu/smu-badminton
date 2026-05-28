@@ -38,6 +38,7 @@ Copy `.env.example` to `.env` and configure:
 - `CAS_ORIGIN`, `WF_ORIGIN`, `WF_API_URL` - University platform URLs
 - `OAUTH_CLIENT_ID` - OAuth client identifier
 - `BADMINTON_TYPE_ID` - Resource type ID for badminton courts
+- `SERVER_PORT` - (optional) Override dev server port, defaults to 5002
 
 ## Architecture
 
@@ -50,10 +51,10 @@ Copy `.env.example` to `.env` and configure:
 | Module | Purpose |
 |--------|---------|
 | `server_fastapi.py` | FastAPI app, all REST endpoints, lifespan, static files |
-| `server_models.py` | Pydantic request/response models, MetricsMiddleware, RateLimitMiddleware, resource locks, job state, availability cache |
+| `server_models.py` | Pydantic request/response models, MetricsMiddleware, RateLimitMiddleware, resource locks, job state, public availability cache + per-user availability cache |
 | `cas_login.py` | CAS auth flow: URL resolution, captcha prep, login with auto/manual captcha, error detection |
 | `cas_login_requests.py` | Compat layer: HTTP retry logic, token cache, network time sync, re-exports from `cas_login` and `booking_api` |
-| `booking_api.py` | Resource queries, time slot queries, appointment creation, availability computation (parallel via ThreadPoolExecutor) |
+| `booking_api.py` | Resource queries, time slot queries, appointment creation, availability computation (parallel via ThreadPoolExecutor + shared Session) |
 | `cas_manager.py` | `BookingManager` singleton: job create/track/stop, DB persistence, scheduled/immediate booking orchestration |
 | `cas_ocr.py` | NCNN-based OCR using ResNet models for captcha solving |
 | `core_utils.py` | Thread-safe SQLite `DatabasePool`, custom exceptions, error handling decorators, password obfuscation |
@@ -62,7 +63,7 @@ Copy `.env.example` to `.env` and configure:
 ### Module Dependencies
 
 ```
-server_fastapi → server_models, cas_manager, cas_login, cas_login_requests, config, core_utils
+server_fastapi → server_models, cas_manager, cas_login, cas_login_requests, booking_api, config, core_utils
 cas_manager → cas_login_requests, core_utils
 cas_login_requests → cas_login, booking_api  (compat/bridge layer)
 booking_api → cas_login_requests  (for HTTP retry helpers)
@@ -72,7 +73,7 @@ cas_login → cas_ocr, config
 ### Data Flow
 
 1. **Login**: `prepare_login_session()` / `login_with_auto_captcha()` → CAS login page → captcha OCR → POST credentials → follow redirects → extract OIDC tokens (access_token + id_token) from URL fragment
-2. **Availability**: `POST /api/availability` → check 30s cache → `compute_availability_for_date()` (parallel: resource list + appointment list + time slot queries) → cache result
+2. **Availability**: `POST /api/availability` → check 60s public cache (shared across users, keyed by bookdate) → cache HIT: only query appointments for `bookedByMe`; cache MISS: full query (resources + time slots + appointments) via shared `requests.Session` with connection pooling → store slots in public cache, merge `bookedByMe` per-user
 3. **Immediate Booking**: `POST /api/book` → lock resource → insert `local_bookings` → `book_badminton_slot()` → single-threaded attempt
 4. **Scheduled Booking**: `POST /api/book/schedule` → `BookingManager.start_scheduled_booking()` → wait until target time → login → prefetch → spawn N barrier-synchronized worker threads → fire booking requests simultaneously
 
@@ -80,6 +81,10 @@ cas_login → cas_ocr, config
 
 - **Token Caching**: `get_token_cached()` per-user dict with configurable TTL (default 900s), thread-safe
 - **Profile Caching**: `_TOKEN_PROFILE_CACHE` stores user profile from JWT claims
+- **Public Availability Cache**: `_avail_public_cache` keyed by bookdate (60s TTL), shared across all users — slots data is the same for everyone; only `bookedByMe` is queried per-user on cache HIT
+- **Per-User Availability Cache**: `_availability_cache` (legacy, keyed by token+bookdate) retained for compat but no longer used in the availability endpoint
+- **Shared HTTP Session**: `_shared_session()` creates `requests.Session` with connection pool (20 conns) for reuse across parallel GraphQL queries within a single availability request
+- **GraphQL Request Helper**: `_make_graphql_request()` centralizes retry logic (2 attempts, 0.3s backoff), SSL error detection, and slow-query logging (>500ms)
 - **Resource Locking**: asyncio locks per `(resources_name, bookdate, kssj, jssj)` prevent duplicate concurrent bookings; separate thread locks for sync code
 - **Local Booking Tracking**: SQLite `local_bookings` UNIQUE constraint `(bookdate, resources_name, kssj, jssj)` prevents race conditions at DB level
 - **Job Persistence**: `scheduled_jobs` table survives server restarts; `load_pending_jobs()` restores on startup
@@ -125,4 +130,4 @@ Located in `model/` directory (gitignored):
 
 ### Port Convention
 
-Dev server defaults to port 5002 (`__main__` block). Docker/production uses port 5000.
+Dev server defaults to port 5002 (`__main__` block, overridable via `SERVER_PORT` env var). Docker/production uses port 5000 (`SERVER_PORT=5000` in docker-compose).

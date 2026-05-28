@@ -269,10 +269,52 @@ def resolve_user_info(token: str, id_token: str = "") -> Dict[str, Any] | None:
 
 # ============= 资源查询 API =============
 
-def find_time_slots_by_resource(token, resources_id, date_ms, id_token=""):
-    """按日期时间戳查询资源时段及可预约数量。"""
-    from .cas_login_requests import requests_post_with_retry
+def _make_graphql_request(session, url, headers, payload, log_name=""):
+    """使用共享 Session 发送 GraphQL 请求，带重试。"""
+    max_retries = 2
+    timeout = 10
+    for attempt in range(max_retries):
+        try:
+            t0 = time.time()
+            resp = session.post(url, json=payload, headers=headers, timeout=timeout)
+            elapsed = (time.time() - t0) * 1000
+            if log_name and elapsed > 500:
+                logger.info("[性能] %s: %.0fms (attempt %d)", log_name, elapsed, attempt + 1)
+            if resp.status_code == 200:
+                body = resp.json()
+                if "errors" in body:
+                    err_msg = body["errors"][0].get("message", "") if body["errors"] else ""
+                    logger.warning("%s GraphQL error: %s", log_name, err_msg)
+                    # token 过期不重试
+                    if "ACCESS_TOKEN_INVALID" in str(body) or "过期" in err_msg:
+                        return resp
+                return resp
+            logger.warning("%s failed status=%d, retrying (%d/%d)", log_name, resp.status_code, attempt + 1, max_retries)
+        except Exception as e:
+            logger.warning("%s exception=%s, retrying (%d/%d)", log_name, e, attempt + 1, max_retries)
+            if _is_ssl_error(e) and attempt >= 1:
+                break
+        if attempt < max_retries - 1:
+            time.sleep(0.3)
+    return None
 
+
+def _is_ssl_error(error: Exception) -> bool:
+    error_str = str(error).lower()
+    return 'ssl' in error_str or 'eof' in error_str or 'protocol' in error_str
+
+
+def _shared_session():
+    """创建带连接池的共享 Session，复用 TCP/TLS 连接。"""
+    s = requests.Session()
+    adapter = requests.adapters.HTTPAdapter(pool_connections=20, pool_maxsize=20)
+    s.mount('https://', adapter)
+    s.mount('http://', adapter)
+    return s
+
+
+def find_time_slots_by_resource(token, resources_id, date_ms, id_token="", session=None):
+    """按日期时间戳查询资源时段及可预约数量。"""
     headers = {
         "Authorization": f"Bearer {token}",
         "Content-Type": "application/json",
@@ -287,19 +329,18 @@ def find_time_slots_by_resource(token, resources_id, date_ms, id_token=""):
         },
         "query": """query findResourcesTimeSlotByResourcesIdAndDate($resourcesId: String!, $date: Date!) {\n  findResourcesTimeSlotByResourcesIdAndDate(resourcesId: $resourcesId, date: $date) {\n    id\n    resources_id\n    kssj\n    jssj\n    order\n    del\n    create_time\n    canAppointmentNumberDesc\n    canAppointmentNumberDesc_en\n    canAppointmentNumber\n  }\n}\n"""
     }
-    resp = requests_post_with_retry(_graphql_url(id_token), json=payload, headers=headers)
+    s = session or requests
+    resp = _make_graphql_request(s, _graphql_url(id_token), headers, payload, f"time_slots({resources_id[:8]})")
     if not resp:
         return None
     return resp.json()
 
 
-def list_resources_by_account(token, bookdate, type_id=None, id_token="", account=""):
+def list_resources_by_account(token, bookdate, type_id=None, id_token="", account="", session=None):
     """
     基于 findResourcesAllByAccount 获取指定日期的资源列表（包含时间段）。
     返回 JSON 数据结构中的 resources 列表，失败返回 None。
     """
-    from .cas_login_requests import requests_post_with_retry
-
     if type_id is None:
         type_id = BADMINTON_TYPE_ID
     headers = {
@@ -329,7 +370,11 @@ def list_resources_by_account(token, bookdate, type_id=None, id_token="", accoun
         },
         "query": "query findResourcesAllByAccount($first: Int, $offset: Int, $typeId: String, $typeName: String, $resourceName: String, $bookDate: String, $bookStartTime: String, $bookEndTime: String, $item_name: [String], $is_cyclicity: String, $cyclicity_start_date: String, $cyclicity_end_date: String, $cyclicity_start_time: String, $cyclicity_end_time: String, $cyclicity_strategy: String, $cyclicity_weekList: [String], $cyclicity_dayList: [String], $order_by: String, $cur_language: String, $filter: ResourcesFilterMap) { findResourcesAllByAccount(first: $first, offset: $offset, typeId: $typeId, typeName: $typeName, resourceName: $resourceName, bookDate: $bookDate, bookStartTime: $bookStartTime, bookEndTime: $bookEndTime, item_name: $item_name, is_cyclicity: $is_cyclicity, cyclicity_start_date: $cyclicity_start_date, cyclicity_end_date: $cyclicity_end_date, cyclicity_start_time: $cyclicity_start_time, cyclicity_end_time: $cyclicity_end_time, cyclicity_strategy: $cyclicity_strategy, cyclicity_weekList: $cyclicity_weekList, cyclicity_dayList: $cyclicity_dayList, order_by: $order_by, cur_language: $cur_language, filter: $filter) { id resources_name available_number resourcesTimeSlot { id kssj jssj } } }"
     }
-    resp = requests_post_with_retry(_graphql_url(id_token), json=payload, headers=headers)
+    s = session or requests
+    t0 = time.time()
+    resp = _make_graphql_request(s, _graphql_url(id_token), headers, payload, "list_resources")
+    elapsed = (time.time() - t0) * 1000
+    logger.info("[性能] list_resources_by_account: %.0fms", elapsed)
     if not resp:
         return None
     data = resp.json()
@@ -401,12 +446,10 @@ def demo_check_availability(token, bookdate, resources_name=None):
 
 # ============= 预约记录查询 =============
 
-def list_appointments_for_account(token, bookdate, id_token=""):
+def list_appointments_for_account(token, bookdate, id_token="", session=None):
     """
     拉取当前账户在指定日期的预约记录，返回 edges 列表。
     """
-    from .cas_login_requests import requests_post_with_retry
-
     # 将 YYYY-MM-DD 转为当天 00:00:00 的毫秒时间戳以便对比
     dt = datetime.strptime(bookdate, "%Y-%m-%d")
     bookdate_ms = int(dt.timestamp() * 1000)
@@ -429,7 +472,10 @@ def list_appointments_for_account(token, bookdate, id_token=""):
         },
         "query": """query findAppointmentInformationAllForAccount($first: Int, $offset: Int, $after: String, $filter: AppointmentInformationFilterMap, $appointmentDate: [String], $only_flow: String, $updateAppointmentState: String) {\n  findAppointmentInformationAllForAccount(first: $first, offset: $offset, after: $after, filter: $filter, appointmentDate: $appointmentDate, only_flow: $only_flow, updateAppointmentState: $updateAppointmentState) {\n    edges {\n      node {\n        resources_id\n        resources_name\n        appointment_date\n        start_time\n        end_time\n        state\n      }\n      cursor\n    }\n    pageInfo { endCursor startCursor }\n    totalCount\n  }\n}\n"""
     }
-    resp = requests_post_with_retry(_graphql_url(id_token), json=payload, headers=headers)
+    s = session or requests
+    t0 = time.time()
+    resp = _make_graphql_request(s, _graphql_url(id_token), headers, payload, "list_appointments")
+    logger.info("[性能] list_appointments_for_account: %.0fms", (time.time() - t0) * 1000)
     if not resp:
         return []
     data = resp.json()
@@ -440,38 +486,56 @@ def list_appointments_for_account(token, bookdate, id_token=""):
 
 
 def compute_availability_for_date(token, bookdate, id_token=""):
-    """计算指定日期所有资源的可用性。"""
+    """计算指定日期所有资源的可用性。使用共享 Session 复用连接，全并发请求。"""
     t0 = time.time()
+    session = _shared_session()
 
-    # 并发获取资源列表和用户预约记录
+    # 阶段 1：并发获取资源列表 + 预约记录
     t1 = time.time()
     with ThreadPoolExecutor(max_workers=2) as init_executor:
-        resources_future = init_executor.submit(list_resources_by_account, token, bookdate, id_token=id_token)
-        appointments_future = init_executor.submit(list_appointments_for_account, token, bookdate, id_token=id_token)
+        resources_future = init_executor.submit(
+            list_resources_by_account, token, bookdate, id_token=id_token, session=session
+        )
+        appointments_future = init_executor.submit(
+            list_appointments_for_account, token, bookdate, id_token=id_token, session=session
+        )
         resources = resources_future.result()
         my_edges = appointments_future.result()
     t2 = time.time()
-    logger.info(f"[性能] 获取资源列表+预约记录: {(t2-t1)*1000:.0f}ms")
+    logger.info("[性能] 获取资源列表+预约记录: %.0fms", (t2 - t1) * 1000)
 
-    if not resources:
-        return []
+    my_map = _build_my_bookings_map(my_edges)
+    slots_data = _fetch_all_time_slots(token, bookdate, resources, id_token=id_token, session=session)
+    return _merge_bookings(slots_data, my_map, t0)
 
+
+def _build_my_bookings_map(my_edges):
+    """从预约记录构建 bookedByMe 映射。"""
     my_map = {}
     for e in my_edges:
         n = e.get('node', {})
         key = (n.get('resources_id'), n.get('start_time'), n.get('end_time'))
         my_map[key] = True
+    return my_map
+
+
+def _fetch_all_time_slots(token, bookdate, resources, id_token="", session=None):
+    """获取所有场地的可用性数据（不含 bookedByMe）。返回 dict: rid -> (rname, slots_raw)。"""
+    if not resources:
+        return {}
 
     dt = datetime.strptime(bookdate, "%Y-%m-%d")
     date_ms = int(dt.timestamp() * 1000)
 
     rid_list = [(r.get('id'), r.get('resources_name')) for r in resources]
     results_map = {}
-    # 并发数最多到 15，所有场地同时查询
     t3 = time.time()
     max_workers = max(1, min(15, len(rid_list)))
     with ThreadPoolExecutor(max_workers=max_workers) as executor:
-        future_map = {executor.submit(find_time_slots_by_resource, token, rid, date_ms): (rid, rname) for rid, rname in rid_list}
+        future_map = {
+            executor.submit(find_time_slots_by_resource, token, rid, date_ms, id_token=id_token, session=session): (rid, rname)
+            for rid, rname in rid_list
+        }
         for fut in as_completed(future_map):
             rid, rname = future_map[fut]
             detail = None
@@ -481,10 +545,14 @@ def compute_availability_for_date(token, bookdate, id_token=""):
                 detail = None
             results_map[rid] = (rname, detail)
     t4 = time.time()
-    logger.info(f"[性能] 获取{len(rid_list)}个场地时间槽: {(t4-t3)*1000:.0f}ms")
+    logger.info("[性能] 获取%d个场地时间槽: %.0fms", len(rid_list), (t4 - t3) * 1000)
+    return results_map
 
+
+def _merge_bookings(slots_data, my_map, t0=None):
+    """合并可用性数据和 bookedByMe。"""
     out = []
-    for rid, (rname, detail) in results_map.items():
+    for rid, (rname, detail) in slots_data.items():
         slots = []
         if detail and 'data' in detail:
             for s in detail['data'].get('findResourcesTimeSlotByResourcesIdAndDate', []):
@@ -499,8 +567,8 @@ def compute_availability_for_date(token, bookdate, id_token=""):
                 })
         out.append({'resources_id': rid, 'resources_name': rname, 'slots': slots})
 
-    t5 = time.time()
-    logger.info(f"[性能] compute_availability_for_date 总耗时: {(t5-t0)*1000:.0f}ms")
+    if t0:
+        logger.info("[性能] compute_availability_for_date 总耗时: %.0fms", (time.time() - t0) * 1000)
     return out
 
 
