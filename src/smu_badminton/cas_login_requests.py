@@ -282,6 +282,8 @@ from .booking_api import (
     list_appointments_for_account,
     resolve_user_info,
     get_user_info_from_appointment,
+    check_resource_time_slot_capacity,
+    find_resource_detail,
 )
 
 

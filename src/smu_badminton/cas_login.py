@@ -195,6 +195,7 @@ def cas_login(login_url, captcha_url, username, password):
         'password': password,
         'execution': execution_value,
         '_eventId': 'submit',
+        'geolocation': '',
         'validateCode': captcha,
     }
 
@@ -266,7 +267,7 @@ def cas_login_stable(login_url, captcha_url, username, password):
     for _attempt in range(1, 4):
         session = requests.Session()
         headers_get = {
-            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/123.0.0.0 Safari/537.36"
+            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/137.0.0.0 Safari/537.36"
         }
         try:
             cas_url = _resolve_cas_login_url(session, login_url, timeout=20)
@@ -295,6 +296,7 @@ def cas_login_stable(login_url, captcha_url, username, password):
                 "password": password,
                 "execution": execution_value,
                 "_eventId": evt,
+                "geolocation": "",
                 "validateCode": captcha,
             }
             post_resp = session.post(cas_url, data=data, headers=headers_post, allow_redirects=False, timeout=20)
@@ -399,7 +401,7 @@ def prepare_login_session(login_url: str, captcha_url: str | None = None) -> Tup
     session = requests.Session()
     captcha_url = (captcha_url or CAS_CAPTCHA_URL).strip()
     headers = {
-        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/123.0.0.0 Safari/537.36"
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/137.0.0.0 Safari/537.36"
     }
 
     # 解析 CAS 登录 URL
@@ -446,7 +448,7 @@ def attempt_login_with_captcha(
         LoginResult: 登录结果
     """
     headers = {
-        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/123.0.0.0 Safari/537.36",
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/137.0.0.0 Safari/537.36",
         "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8",
         "Content-Type": "application/x-www-form-urlencoded",
         "Origin": CAS_ORIGIN,
@@ -466,6 +468,7 @@ def attempt_login_with_captcha(
             "password": password,
             "execution": execution_value,
             "_eventId": evt,
+            "geolocation": "",
             "validateCode": captcha_code,
         }
 

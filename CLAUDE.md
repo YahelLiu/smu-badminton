@@ -4,83 +4,102 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Project Overview
 
-SMU Badminton Court Booking System - A web application for booking badminton courts at Shanghai Maritime University. The system features:
-- CAS (Central Authentication Service) authentication with OCR-based captcha solving
-- Real-time availability checking for badminton courts
-- Immediate and scheduled booking with multi-threaded concurrent requests
-- FastAPI backend with SQLite storage
+SMU Badminton Court Booking System - Web app for booking badminton courts at Shanghai Maritime University. CAS authentication with OCR captcha solving, real-time availability checking, immediate/scheduled booking with multi-threaded concurrent requests. FastAPI backend, SQLite storage.
 
 ## Development Commands
 
-### Running the Server
-
 ```bash
-# Development (with auto-reload)
-python server_fastapi.py
+# Install (editable)
+pip install -e .
 
-# Or using uvicorn directly
-uvicorn server_fastapi:app --host 0.0.0.0 --port 5000 --reload
+# Run dev server (port 5002, auto-reload)
+python -m smu_badminton.server_fastapi
 
-# Production (Docker)
+# Run with uvicorn directly
+uvicorn smu_badminton.server_fastapi:app --host 0.0.0.0 --port 5000 --reload
+
+# Debug mode (verbose booking logs)
+BOOKING_DEBUG=1 python -m smu_badminton.server_fastapi
+
+# Production
 docker-compose up --build
+
+# Tests
+python -m pytest tests/ -v                          # all
+python -m pytest tests/unit/ -v                     # unit only
+python -m pytest tests/integration/ -v              # integration only
+python -m pytest tests/unit/test_obfuscate.py -v    # single file
+python -m pytest tests/unit/test_obfuscate.py::test_roundtrip -v  # single test
 ```
 
-### Environment Setup
+## Environment Setup
 
-1. Copy `.env.example` to `.env` and configure:
-   - `CAS_ORIGIN`, `WF_ORIGIN`, `WF_API_URL` - University platform URLs
-   - `OAUTH_CLIENT_ID` - OAuth client identifier
-   - `BADMINTON_TYPE_ID` - Resource type ID for badminton courts
-
-2. Install dependencies:
-   ```bash
-   pip install -r requirements.txt
-   ```
-
-### Debug Mode
-
-Enable verbose booking logs:
-```bash
-BOOKING_DEBUG=1 python server_fastapi.py
-```
+Copy `.env.example` to `.env` and configure:
+- `CAS_ORIGIN`, `WF_ORIGIN`, `WF_API_URL` - University platform URLs
+- `OAUTH_CLIENT_ID` - OAuth client identifier
+- `BADMINTON_TYPE_ID` - Resource type ID for badminton courts
 
 ## Architecture
 
+### Package Layout
+
+`src/smu_badminton/` with src layout. Entry point: `smu_badminton.server_fastapi:main`.
+
 ### Core Modules
 
-| File | Purpose |
-|------|---------|
-| `server_fastapi.py` | FastAPI application with all REST endpoints, middleware (CORS, rate limiting, metrics), and WebSocket handling |
-| `cas_login_requests.py` | CAS authentication flow, booking API interactions, token management, and network time synchronization |
-| `cas_manager.py` | `BookingManager` class for creating/tracking/stopping booking jobs (immediate and scheduled) |
+| Module | Purpose |
+|--------|---------|
+| `server_fastapi.py` | FastAPI app, all REST endpoints, lifespan, static files |
+| `server_models.py` | Pydantic request/response models, MetricsMiddleware, RateLimitMiddleware, resource locks, job state, availability cache |
+| `cas_login.py` | CAS auth flow: URL resolution, captcha prep, login with auto/manual captcha, error detection |
+| `cas_login_requests.py` | Compat layer: HTTP retry logic, token cache, network time sync, re-exports from `cas_login` and `booking_api` |
+| `booking_api.py` | Resource queries, time slot queries, appointment creation, availability computation (parallel via ThreadPoolExecutor) |
+| `cas_manager.py` | `BookingManager` singleton: job create/track/stop, DB persistence, scheduled/immediate booking orchestration |
 | `cas_ocr.py` | NCNN-based OCR using ResNet models for captcha solving |
-| `core_utils.py` | Thread-safe SQLite connection pool, custom exceptions, error handling decorators, password obfuscation |
-| `config.py` | Environment configuration loaded from `.env` |
+| `core_utils.py` | Thread-safe SQLite `DatabasePool`, custom exceptions, error handling decorators, password obfuscation |
+| `config.py` | Environment configuration from `.env` |
+
+### Module Dependencies
+
+```
+server_fastapi → server_models, cas_manager, cas_login, cas_login_requests, config, core_utils
+cas_manager → cas_login_requests, core_utils
+cas_login_requests → cas_login, booking_api  (compat/bridge layer)
+booking_api → cas_login_requests  (for HTTP retry helpers)
+cas_login → cas_ocr, config
+```
 
 ### Data Flow
 
-1. **Login Flow**: `cas_login_requests.login_with_retry()` → CAS login with captcha OCR → OIDC token extraction
-2. **Immediate Booking**: `POST /api/book` → `cas_manager.book_badminton_slot()` → single-threaded booking attempt
-3. **Scheduled Booking**: `POST /api/book/schedule` → `BookingManager.start_scheduled_booking()` → waits until target time (7 days before bookdate) → multi-threaded concurrent booking
+1. **Login**: `prepare_login_session()` / `login_with_auto_captcha()` → CAS login page → captcha OCR → POST credentials → follow redirects → extract OIDC tokens (access_token + id_token) from URL fragment
+2. **Availability**: `POST /api/availability` → check 30s cache → `compute_availability_for_date()` (parallel: resource list + appointment list + time slot queries) → cache result
+3. **Immediate Booking**: `POST /api/book` → lock resource → insert `local_bookings` → `book_badminton_slot()` → single-threaded attempt
+4. **Scheduled Booking**: `POST /api/book/schedule` → `BookingManager.start_scheduled_booking()` → wait until target time → login → prefetch → spawn N barrier-synchronized worker threads → fire booking requests simultaneously
 
 ### Key Design Patterns
 
-- **Token Caching**: `get_token_cached()` caches OIDC tokens per-user with configurable TTL (default 900s)
-- **Resource Locking**: asyncio locks per `(resources_name, bookdate, kssj, jssj)` tuple prevent duplicate concurrent bookings
-- **Local Booking Tracking**: SQLite table `local_bookings` with UNIQUE constraint prevents race conditions
-- **Job Persistence**: `scheduled_jobs` table survives server restarts; pending jobs are restored on startup
-- **Password Obfuscation**: XOR + base64 encoding for stored passwords (not encryption, just prevents plaintext exposure)
+- **Token Caching**: `get_token_cached()` per-user dict with configurable TTL (default 900s), thread-safe
+- **Profile Caching**: `_TOKEN_PROFILE_CACHE` stores user profile from JWT claims
+- **Resource Locking**: asyncio locks per `(resources_name, bookdate, kssj, jssj)` prevent duplicate concurrent bookings; separate thread locks for sync code
+- **Local Booking Tracking**: SQLite `local_bookings` UNIQUE constraint `(bookdate, resources_name, kssj, jssj)` prevents race conditions at DB level
+- **Job Persistence**: `scheduled_jobs` table survives server restarts; `load_pending_jobs()` restores on startup
+- **Password Obfuscation**: XOR + base64 using `SECRET_KEY` env var (not encryption, prevents plaintext exposure)
+- **Dual Login Strategy**: `CAS_LOGIN_STABLE_FIRST` env var controls which login method is tried first, with fallback
+- **Thread-safe SQLite**: `DatabasePool` uses `threading.local()` for per-thread connections, WAL mode
 
 ### Database Schema
 
-Two SQLite tables managed via `core_utils.DatabasePool`:
-
-- `local_bookings`: Tracks active bookings to prevent duplicates
+Two SQLite tables via `core_utils.DatabasePool`:
+- `local_bookings`: Tracks active bookings (UNIQUE on bookdate, resources_name, kssj, jssj)
 - `scheduled_jobs`: Persists booking jobs across restarts
+
+### Scheduled Booking Timing
+
+Target time = `bookdate - 7 days + target_time_str`. E.g., booking for 2025-12-18 with target 21:00:00 means attempt at 2025-12-11 21:00:00.
 
 ### OCR Models
 
-Located in `model/` directory:
+Located in `model/` directory (gitignored):
 - `resnet34_digit_latest.fp32.*` - Digit recognition
 - `resnet18_operator_latest.fp32.*` - Operator recognition (+, -, *)
 - `resnet18_equal_symbol_latest.fp32.*` - Equal symbol type detection (Chinese vs symbolic)
@@ -89,15 +108,21 @@ Located in `model/` directory:
 
 | Endpoint | Method | Purpose |
 |----------|--------|---------|
+| `/api/availability` | POST | Check court availability (token + bookdate) |
 | `/api/book` | POST | Immediate booking attempt |
 | `/api/book/schedule` | POST | Schedule booking for specific time |
-| `/api/availability` | POST | Check court availability for a date |
 | `/api/jobs` | GET | List all booking jobs |
 | `/api/jobs/{job_id}/stop` | POST | Cancel a scheduled job |
-| `/api/local_bookings` | GET | List local booking records for a date |
-| `/api/config` | GET | Get frontend configuration |
-| `/health` | GET | Health check endpoint |
+| `/api/jobs/stop_by_params` | POST | Cancel job by booking params |
+| `/api/local_bookings` | GET | List local booking records |
+| `/api/login` | POST | CAS login with captcha |
+| `/api/captcha` | POST | Get captcha image |
+| `/api/logout` | POST | Clear token cache |
+| `/api/auth/check` | GET | Check auth status |
+| `/api/config` | GET | Frontend configuration |
+| `/api/metrics` | GET | Request metrics |
+| `/health` | GET | Health check |
 
-### Scheduled Booking Timing
+### Port Convention
 
-Target booking time is calculated as `bookdate - 7 days + target_time_str`. For example, booking for 2025-12-18 with target time 21:00:00 means the system will attempt booking at 2025-12-11 21:00:00.
+Dev server defaults to port 5002 (`__main__` block). Docker/production uses port 5000.

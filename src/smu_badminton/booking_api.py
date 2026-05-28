@@ -34,6 +34,13 @@ def _debug(msg: str):
         logger.debug(msg)
 
 
+def _graphql_url(id_token: str = "") -> str:
+    """构建 GraphQL API URL，附带 id_token_hint 查询参数。"""
+    if id_token:
+        return f"{WF_API_URL}?id_token_hint={id_token}"
+    return WF_API_URL
+
+
 # ============= Token Profile 缓存 =============
 
 _TOKEN_PROFILE_CACHE: Dict[str, Dict[str, Any]] = {}
@@ -161,7 +168,7 @@ def _build_user_info_from_profile(profile: Dict[str, Any] | None) -> Dict[str, A
 
 # ============= 用户信息获取 =============
 
-def get_user_info_from_appointment(token):
+def get_user_info_from_appointment(token, id_token=""):
     """尝试从已有预约记录中推断用户信息。"""
     from .cas_login_requests import requests_post_with_retry
 
@@ -169,7 +176,7 @@ def get_user_info_from_appointment(token):
         "Authorization": f"Bearer {token}",
         "Content-Type": "application/json",
         "Origin": WF_ORIGIN,
-        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/140.0.0.0 Safari/537.36 Edg/140.0.0.0",
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/137.0.0.0 Safari/537.36 Edg/137.0.0.0",
     }
 
     payload = {
@@ -213,7 +220,7 @@ def get_user_info_from_appointment(token):
     }
 
     try:
-        response = requests_post_with_retry(WF_API_URL, json=payload, headers=headers)
+        response = requests_post_with_retry(_graphql_url(id_token), json=payload, headers=headers)
         if response is None or response.status_code != 200:
             _debug(f"get_user_info_from_appointment failed, status={response.status_code if response else 'None'}")
             return None
@@ -247,9 +254,9 @@ def get_user_info_from_appointment(token):
         return None
 
 
-def resolve_user_info(token: str) -> Dict[str, Any] | None:
+def resolve_user_info(token: str, id_token: str = "") -> Dict[str, Any] | None:
     """先从 API 获取预约用户信息，失败再回退到 JWT claims。"""
-    user_info = get_user_info_from_appointment(token)
+    user_info = get_user_info_from_appointment(token, id_token=id_token)
     if user_info:
         return user_info
 
@@ -262,7 +269,7 @@ def resolve_user_info(token: str) -> Dict[str, Any] | None:
 
 # ============= 资源查询 API =============
 
-def find_time_slots_by_resource(token, resources_id, date_ms):
+def find_time_slots_by_resource(token, resources_id, date_ms, id_token=""):
     """按日期时间戳查询资源时段及可预约数量。"""
     from .cas_login_requests import requests_post_with_retry
 
@@ -270,7 +277,7 @@ def find_time_slots_by_resource(token, resources_id, date_ms):
         "Authorization": f"Bearer {token}",
         "Content-Type": "application/json",
         "Origin": WF_ORIGIN,
-        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/140.0.0.0 Safari/537.36 Edg/140.0.0.0",
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/137.0.0.0 Safari/537.36 Edg/137.0.0.0",
     }
     payload = {
         "operationName": "findResourcesTimeSlotByResourcesIdAndDate",
@@ -280,13 +287,13 @@ def find_time_slots_by_resource(token, resources_id, date_ms):
         },
         "query": """query findResourcesTimeSlotByResourcesIdAndDate($resourcesId: String!, $date: Date!) {\n  findResourcesTimeSlotByResourcesIdAndDate(resourcesId: $resourcesId, date: $date) {\n    id\n    resources_id\n    kssj\n    jssj\n    order\n    del\n    create_time\n    canAppointmentNumberDesc\n    canAppointmentNumberDesc_en\n    canAppointmentNumber\n  }\n}\n"""
     }
-    resp = requests_post_with_retry(WF_API_URL, json=payload, headers=headers)
+    resp = requests_post_with_retry(_graphql_url(id_token), json=payload, headers=headers)
     if not resp:
         return None
     return resp.json()
 
 
-def list_resources_by_account(token, bookdate, type_id=None):
+def list_resources_by_account(token, bookdate, type_id=None, id_token="", account=""):
     """
     基于 findResourcesAllByAccount 获取指定日期的资源列表（包含时间段）。
     返回 JSON 数据结构中的 resources 列表，失败返回 None。
@@ -299,20 +306,30 @@ def list_resources_by_account(token, bookdate, type_id=None):
         "Authorization": f"Bearer {token}",
         "Content-Type": "application/json",
         "Origin": WF_ORIGIN,
-        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/136.0.0.0 Safari/537.36 Edg/136.0.0.0",
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/137.0.0.0 Safari/537.36 Edg/137.0.0.0",
     }
     payload = {
         "operationName": "findResourcesAllByAccount",
         "variables": {
-            "first": 100,
-            "offset": 0,
             "typeId": type_id,
             "bookDate": bookdate,
-            "cur_language": "zh_CN"
+            "bookStartTime": "",
+            "bookEndTime": "",
+            "item_name": [],
+            "resourceName": "",
+            "account": account,
+            "cur_language": "zh",
+            "order_by": "",
+            "filter": {
+                "campus_code": {"eq": ""},
+                "building_code": {"eq": ""},
+                "floor_code": {"eq": ""},
+                "need_approve": {"eq": None}
+            }
         },
         "query": "query findResourcesAllByAccount($first: Int, $offset: Int, $typeId: String, $typeName: String, $resourceName: String, $bookDate: String, $bookStartTime: String, $bookEndTime: String, $item_name: [String], $is_cyclicity: String, $cyclicity_start_date: String, $cyclicity_end_date: String, $cyclicity_start_time: String, $cyclicity_end_time: String, $cyclicity_strategy: String, $cyclicity_weekList: [String], $cyclicity_dayList: [String], $order_by: String, $cur_language: String, $filter: ResourcesFilterMap) { findResourcesAllByAccount(first: $first, offset: $offset, typeId: $typeId, typeName: $typeName, resourceName: $resourceName, bookDate: $bookDate, bookStartTime: $bookStartTime, bookEndTime: $bookEndTime, item_name: $item_name, is_cyclicity: $is_cyclicity, cyclicity_start_date: $cyclicity_start_date, cyclicity_end_date: $cyclicity_end_date, cyclicity_start_time: $cyclicity_start_time, cyclicity_end_time: $cyclicity_end_time, cyclicity_strategy: $cyclicity_strategy, cyclicity_weekList: $cyclicity_weekList, cyclicity_dayList: $cyclicity_dayList, order_by: $order_by, cur_language: $cur_language, filter: $filter) { id resources_name available_number resourcesTimeSlot { id kssj jssj } } }"
     }
-    resp = requests_post_with_retry(WF_API_URL, json=payload, headers=headers)
+    resp = requests_post_with_retry(_graphql_url(id_token), json=payload, headers=headers)
     if not resp:
         return None
     data = resp.json()
@@ -384,7 +401,7 @@ def demo_check_availability(token, bookdate, resources_name=None):
 
 # ============= 预约记录查询 =============
 
-def list_appointments_for_account(token, bookdate):
+def list_appointments_for_account(token, bookdate, id_token=""):
     """
     拉取当前账户在指定日期的预约记录，返回 edges 列表。
     """
@@ -398,7 +415,7 @@ def list_appointments_for_account(token, bookdate):
         "Authorization": f"Bearer {token}",
         "Content-Type": "application/json",
         "Origin": WF_ORIGIN,
-        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/140.0.0.0 Safari/537.36 Edg/140.0.0.0",
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/137.0.0.0 Safari/537.36 Edg/137.0.0.0",
     }
     payload = {
         "operationName": "findAppointmentInformationAllForAccount",
@@ -412,7 +429,7 @@ def list_appointments_for_account(token, bookdate):
         },
         "query": """query findAppointmentInformationAllForAccount($first: Int, $offset: Int, $after: String, $filter: AppointmentInformationFilterMap, $appointmentDate: [String], $only_flow: String, $updateAppointmentState: String) {\n  findAppointmentInformationAllForAccount(first: $first, offset: $offset, after: $after, filter: $filter, appointmentDate: $appointmentDate, only_flow: $only_flow, updateAppointmentState: $updateAppointmentState) {\n    edges {\n      node {\n        resources_id\n        resources_name\n        appointment_date\n        start_time\n        end_time\n        state\n      }\n      cursor\n    }\n    pageInfo { endCursor startCursor }\n    totalCount\n  }\n}\n"""
     }
-    resp = requests_post_with_retry(WF_API_URL, json=payload, headers=headers)
+    resp = requests_post_with_retry(_graphql_url(id_token), json=payload, headers=headers)
     if not resp:
         return []
     data = resp.json()
@@ -422,15 +439,15 @@ def list_appointments_for_account(token, bookdate):
     return same_day
 
 
-def compute_availability_for_date(token, bookdate):
+def compute_availability_for_date(token, bookdate, id_token=""):
     """计算指定日期所有资源的可用性。"""
     t0 = time.time()
 
     # 并发获取资源列表和用户预约记录
     t1 = time.time()
     with ThreadPoolExecutor(max_workers=2) as init_executor:
-        resources_future = init_executor.submit(list_resources_by_account, token, bookdate)
-        appointments_future = init_executor.submit(list_appointments_for_account, token, bookdate)
+        resources_future = init_executor.submit(list_resources_by_account, token, bookdate, id_token=id_token)
+        appointments_future = init_executor.submit(list_appointments_for_account, token, bookdate, id_token=id_token)
         resources = resources_future.result()
         my_edges = appointments_future.result()
     t2 = time.time()
@@ -487,9 +504,77 @@ def compute_availability_for_date(token, bookdate):
     return out
 
 
+# ============= 预约前置校验 =============
+
+
+def check_resource_time_slot_capacity(token, resource_id, time_slot_id_list, book_date, book_start_time, book_end_time, id_token=""):
+    """检查时段容量是否可约。返回结果 dict 或 None。"""
+    from .cas_login_requests import requests_post_with_retry
+
+    headers = {
+        "Authorization": f"Bearer {token}",
+        "Content-Type": "application/json",
+        "Origin": WF_ORIGIN,
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/137.0.0.0 Safari/537.36 Edg/137.0.0.0",
+    }
+    payload = {
+        "operationName": "checkResourceTimeSlotCapacity",
+        "variables": {
+            "resourceId": resource_id,
+            "appointmentId": "",
+            "bookDate": book_date,
+            "bookStartTime": book_start_time,
+            "bookEndTime": book_end_time,
+            "timeSlotIdList": time_slot_id_list,
+            "borrowDateList": [],
+            "borrowStartTime": "",
+            "borrowEndTime": "",
+            "checkSource": "",
+        },
+        "query": "query checkResourceTimeSlotCapacity($resourceId: String, $appointmentId: String, $bookDate: String, $bookStartTime: String, $bookEndTime: String, $timeSlotIdList: [String], $borrowDateList: [String], $borrowStartTime: String, $borrowEndTime: String, $checkSource: String) { checkResourceTimeSlotCapacity(resourceId: $resourceId, appointmentId: $appointmentId, bookDate: $bookDate, bookStartTime: $bookStartTime, bookEndTime: $bookEndTime, timeSlotIdList: $timeSlotIdList, borrowDateList: $borrowDateList, borrowStartTime: $borrowStartTime, borrowEndTime: $borrowEndTime, checkSource: $checkSource) { code name messages messages_en } }"
+    }
+    try:
+        resp = requests_post_with_retry(_graphql_url(id_token), json=payload, headers=headers)
+        if not resp or resp.status_code != 200:
+            return None
+        data = resp.json()
+        return data.get("data", {}).get("checkResourceTimeSlotCapacity")
+    except Exception as e:
+        logger.warning("checkResourceTimeSlotCapacity error: %s", e)
+        return None
+
+
+def find_resource_detail(token, resource_id, id_token=""):
+    """获取资源详情，含 open_captcha_verify / capacity 等字段。返回 dict 或 None。"""
+    from .cas_login_requests import requests_post_with_retry
+
+    headers = {
+        "Authorization": f"Bearer {token}",
+        "Content-Type": "application/json",
+        "Origin": WF_ORIGIN,
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/137.0.0.0 Safari/537.36 Edg/137.0.0.0",
+    }
+    payload = {
+        "operationName": "findResources",
+        "variables": {
+            "id": resource_id,
+        },
+        "query": "query findResources($id: String!) { findResources(id: $id) { id open_captcha_verify capacity } }"
+    }
+    try:
+        resp = requests_post_with_retry(_graphql_url(id_token), json=payload, headers=headers)
+        if not resp or resp.status_code != 200:
+            return None
+        data = resp.json()
+        return data.get("data", {}).get("findResources")
+    except Exception as e:
+        logger.warning("find_resource_detail error: %s", e)
+        return None
+
+
 # ============= 预约 API =============
 
-def fetch_resource_time_id(token, bookdate, resources_name, kssj, jssj):
+def fetch_resource_time_id(token, bookdate, resources_name, kssj, jssj, id_token=""):
     """获取资源和时间段 ID。"""
     from .cas_login_requests import requests_post_with_retry
 
@@ -497,20 +582,30 @@ def fetch_resource_time_id(token, bookdate, resources_name, kssj, jssj):
         "Authorization": f"Bearer {token}",
         "Content-Type": "application/json",
         "Origin": WF_ORIGIN,
-        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/136.0.0.0 Safari/537.36 Edg/136.0.0.0",
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/137.0.0.0 Safari/537.36 Edg/137.0.0.0",
     }
     payload = {
         "operationName": "findResourcesAllByAccount",
         "variables": {
-            "first": 100,
-            "offset": 0,
             "typeId": BADMINTON_TYPE_ID,
             "bookDate": bookdate,
-            "cur_language": "zh_CN"
+            "bookStartTime": "",
+            "bookEndTime": "",
+            "item_name": [],
+            "resourceName": "",
+            "account": "",
+            "cur_language": "zh",
+            "order_by": "",
+            "filter": {
+                "campus_code": {"eq": ""},
+                "building_code": {"eq": ""},
+                "floor_code": {"eq": ""},
+                "need_approve": {"eq": None}
+            }
         },
         "query": "query findResourcesAllByAccount($first: Int, $offset: Int, $typeId: String, $typeName: String, $resourceName: String, $bookDate: String, $bookStartTime: String, $bookEndTime: String, $item_name: [String], $is_cyclicity: String, $cyclicity_start_date: String, $cyclicity_end_date: String, $cyclicity_start_time: String, $cyclicity_end_time: String, $cyclicity_strategy: String, $cyclicity_weekList: [String], $cyclicity_dayList: [String], $order_by: String, $cur_language: String, $filter: ResourcesFilterMap) { findResourcesAllByAccount(first: $first, offset: $offset, typeId: $typeId, typeName: $typeName, resourceName: $resourceName, bookDate: $bookDate, bookStartTime: $bookStartTime, bookEndTime: $bookEndTime, item_name: $item_name, is_cyclicity: $is_cyclicity, cyclicity_start_date: $cyclicity_start_date, cyclicity_end_date: $cyclicity_end_date, cyclicity_start_time: $cyclicity_start_time, cyclicity_end_time: $cyclicity_end_time, cyclicity_strategy: $cyclicity_strategy, cyclicity_weekList: $cyclicity_weekList, cyclicity_dayList: $cyclicity_dayList, order_by: $order_by, cur_language: $cur_language, filter: $filter) { id resources_name available_number resourcesTimeSlot { id kssj jssj } } }"
     }
-    response = requests_post_with_retry(WF_API_URL, json=payload, headers=headers)
+    response = requests_post_with_retry(_graphql_url(id_token), json=payload, headers=headers)
     if response is None or response.status_code != 200:
         logger.warning("request failed, status=%d", response.status_code if response else 'None')
         return None
@@ -532,13 +627,13 @@ def fetch_resource_time_id(token, bookdate, resources_name, kssj, jssj):
     return None
 
 
-def make_appointment(token, time_id, resource_id, bookdata, kssj, jssj):
+def make_appointment(token, time_id, resource_id, bookdata, kssj, jssj, id_token=""):
     """执行预约。"""
     from .cas_login_requests import requests_post_with_retry
 
     _debug(f"appointment args date={bookdata}, start={kssj}, end={jssj}, resource_id={resource_id}, time_id={time_id}")
 
-    user_info = resolve_user_info(token)
+    user_info = resolve_user_info(token, id_token=id_token)
     if not user_info:
         return {
             "code": "USER_INFO_UNAVAILABLE",
@@ -569,7 +664,7 @@ def make_appointment(token, time_id, resource_id, bookdata, kssj, jssj):
         "Authorization": f"Bearer {token}",
         "Content-Type": "application/json",
         "Origin": WF_ORIGIN,
-        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/136.0.0.0 Safari/537.36 Edg/136.0.0.0",
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/137.0.0.0 Safari/537.36 Edg/137.0.0.0",
     }
     payload = {
         "operationName": "saveAppointmentInformationAll",
@@ -592,7 +687,6 @@ def make_appointment(token, time_id, resource_id, bookdata, kssj, jssj):
                 "person_times": 1,
                 "wemeet_enable": "0",
                 "theme": "",
-                "theme_en": None,
                 "enclosure": "",
                 "enclosure_name": "",
                 "enclosure_size": "",
@@ -614,6 +708,7 @@ def make_appointment(token, time_id, resource_id, bookdata, kssj, jssj):
                     }
                 ],
                 "appointmentCollectionList": [],
+                "need_meeting_signin": 0,
                 "appointment_date": bookdata,
                 "start_time": kssj,
                 "end_time": jssj,
@@ -634,7 +729,7 @@ def make_appointment(token, time_id, resource_id, bookdata, kssj, jssj):
     }
 
     _debug(f"saveAppointmentInformationAll payload timeSlotIdList={payload['variables']['timeSlotIdList']}")
-    response = requests_post_with_retry(WF_API_URL, json=payload, headers=headers)
+    response = requests_post_with_retry(_graphql_url(id_token), json=payload, headers=headers)
     if not response:
         return {"code": "REQUEST_FAILED", "messages": ["Appointment request failed after retries"]}
 

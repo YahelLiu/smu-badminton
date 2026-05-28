@@ -36,6 +36,7 @@ from .cas_manager import book_badminton_slot, schedule_booking, booking_manager
 from .cas_login_requests import login_with_retry, compute_availability_for_date, get_token_cached, clear_token_cache
 from .cas_login import (
     prepare_login_session, login_with_auto_captcha, login_with_manual_captcha,
+    attempt_login_with_captcha,
     LoginErrorType
 )
 from .config import get_frontend_config, CAS_LOGIN_URL, CAS_CAPTCHA_URL, JOB_RETENTION_SEC, AUTHORIZED_USERS, UVICORN_RELOAD

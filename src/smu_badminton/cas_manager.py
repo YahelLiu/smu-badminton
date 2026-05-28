@@ -8,6 +8,8 @@ from .cas_login_requests import (
     get_network_time,
     get_target_datetime_from_network,
     list_appointments_for_account,
+    check_resource_time_slot_capacity,
+    find_resource_detail,
 )
 import threading
 from typing import Any, Dict, Tuple, List
@@ -397,14 +399,15 @@ class BookingManager:
                 self._update_job_row_status(job_id, "cancelled")
                 return
             access_token = tokens["access_token"]
+            id_token = tokens.get("id_token", "")
             # 限制：同一用户同一天只能预约一次
             try:
-                if list_appointments_for_account(access_token, bookdate):
+                if list_appointments_for_account(access_token, bookdate, id_token=id_token):
                     self._update_job_row_status(job_id, "skipped")
                     return
             except Exception:
                 pass
-            result = fetch_resource_time_id(access_token, bookdate, resources_name, kssj, jssj)
+            result = fetch_resource_time_id(access_token, bookdate, resources_name, kssj, jssj, id_token=id_token)
             if not result:
                 self._update_job_row_status(job_id, "failed")
                 return
@@ -412,7 +415,7 @@ class BookingManager:
             if cancel_event.is_set():
                 self._update_job_row_status(job_id, "cancelled")
                 return
-            resp = make_appointment(access_token, time_id, resource_id, bookdate, kssj, jssj)
+            resp = make_appointment(access_token, time_id, resource_id, bookdate, kssj, jssj, id_token=id_token)
             # 根据预约结果更新状态
             if resp and isinstance(resp, dict):
                 code = resp.get("code", "")
@@ -530,14 +533,14 @@ class BookingManager:
 
             # 限制：同一用户同一天只能预约一次
             try:
-                if list_appointments_for_account(access_token, bookdate):
+                if list_appointments_for_account(access_token, bookdate, id_token=tokens.get("id_token", "")):
                     self._cleanup_job(job_id, "skipped", username=username, bookdate=bookdate, kssj=kssj, jssj=jssj, resources_name=resources_name)
                     return
             except Exception:
                 pass
 
             # 预取资源/时间段
-            result = fetch_resource_time_id(access_token, bookdate, resources_name, kssj, jssj)
+            result = fetch_resource_time_id(access_token, bookdate, resources_name, kssj, jssj, id_token=tokens.get("id_token", ""))
             if not result:
                 self._cleanup_job(job_id, "failed", username=username, bookdate=bookdate, kssj=kssj, jssj=jssj, resources_name=resources_name)
                 return
@@ -640,23 +643,40 @@ def book_badminton_slot(
         return {"ok": False, "error": "login_failed"}
 
     access_token = tokens["access_token"]
+    id_token = tokens.get("id_token", "")
 
     # 限制：同一用户同一天只能预约一次
     try:
-        my_edges = list_appointments_for_account(access_token, bookdate)
+        my_edges = list_appointments_for_account(access_token, bookdate, id_token=id_token)
         if my_edges:
             _save_job_record(job_id, login_url, captcha_url, username, password, bookdate, kssj, jssj, resources_name, "", 1, "skipped", created_at)
             return {"ok": False, "error": "user_already_booked_today"}
     except Exception:
         pass
 
-    result = fetch_resource_time_id(access_token, bookdate, resources_name, kssj, jssj)
+    result = fetch_resource_time_id(access_token, bookdate, resources_name, kssj, jssj, id_token=id_token)
     if not result:
         _save_job_record(job_id, login_url, captcha_url, username, password, bookdate, kssj, jssj, resources_name, "", 1, "failed", created_at)
         return {"ok": False, "error": "resource_or_time_not_found"}
 
     resource_id, time_id = result
-    resp_json = make_appointment(access_token, time_id, resource_id, bookdate, kssj, jssj)
+
+    # 即时预约前置校验：检查验证码要求 + 时段容量
+    resource_detail = find_resource_detail(access_token, resource_id, id_token=id_token)
+    if resource_detail and resource_detail.get("open_captcha_verify") == "1":
+        logger.warning("资源需要预约验证码，无法自动预约")
+        _save_job_record(job_id, login_url, captcha_url, username, password, bookdate, kssj, jssj, resources_name, "", 1, "failed", created_at)
+        return {"ok": False, "error": "captcha_verify_required"}
+
+    capacity_result = check_resource_time_slot_capacity(
+        access_token, resource_id, [time_id], bookdate, kssj, jssj, id_token=id_token
+    )
+    if capacity_result and capacity_result.get("code") != "0":
+        logger.warning("时段容量检查失败: %s", capacity_result)
+        _save_job_record(job_id, login_url, captcha_url, username, password, bookdate, kssj, jssj, resources_name, "", 1, "failed", created_at)
+        return {"ok": False, "error": "capacity_check_failed", "detail": capacity_result}
+
+    resp_json = make_appointment(access_token, time_id, resource_id, bookdate, kssj, jssj, id_token=id_token)
 
     # 判断预约是否成功
     if resp_json and isinstance(resp_json, dict):
@@ -733,17 +753,18 @@ def schedule_booking(
     if not tokens or not tokens.get("access_token"):
         return {"ok": False, "error": "login_failed"}
     access_token = tokens["access_token"]
+    id_token = tokens.get("id_token", "")
 
     # 限制：同一用户同一天只能预约一次
     try:
-        my_edges = list_appointments_for_account(access_token, bookdate)
+        my_edges = list_appointments_for_account(access_token, bookdate, id_token=id_token)
         if my_edges:
             return {"ok": False, "error": "user_already_booked_today"}
     except Exception:
         pass
 
     # 3) 使用新token预取资源与时间段ID
-    result = fetch_resource_time_id(access_token, bookdate, resources_name, kssj, jssj)
+    result = fetch_resource_time_id(access_token, bookdate, resources_name, kssj, jssj, id_token=id_token)
     if not result:
         return {"ok": False, "error": "resource_or_time_not_found"}
     resource_id, time_id = result
@@ -772,7 +793,7 @@ def schedule_booking(
 
         # synchronize all threads to fire together
         barrier.wait()
-        resp = make_appointment(access_token, time_id, resource_id, bookdate, kssj, jssj)
+        resp = make_appointment(access_token, time_id, resource_id, bookdate, kssj, jssj, id_token=id_token)
         with results_lock:
             results.append({"thread": thread_id, "response": resp})
 
