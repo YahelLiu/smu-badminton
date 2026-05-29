@@ -1,11 +1,37 @@
+# Python
 .venv/
 __pycache__/
 *.pyc
-.env
-.idea/
-*.har
-model/
-data/
-.claude/
+*.pyo
 *.egg-info/
+.pytest_cache/
+
+# Environment
+.env
+
+# IDE
+.idea/
+
+# Model files (large)
+model/
+
+# Database
+data/
+*.db
+*.sqlite
+*.sqlite3
+
+# Claude Code
+.claude/
+
+# Plans (generated during development)
 docs/
+
+# Temp files
+*.har
+*.log
+*.tmp
+
+# Build
+dist/
+build/

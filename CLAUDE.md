@@ -51,13 +51,13 @@ Copy `.env.example` to `.env` and configure:
 | Module | Purpose |
 |--------|---------|
 | `server_fastapi.py` | FastAPI app, all REST endpoints, lifespan, static files |
-| `server_models.py` | Pydantic request/response models, MetricsMiddleware, RateLimitMiddleware, resource locks, job state, public availability cache + per-user availability cache |
+| `server_models.py` | Pydantic request/response models, MetricsMiddleware, RateLimitMiddleware, resource locks, job state, public availability cache |
 | `cas_login.py` | CAS auth flow: URL resolution, captcha prep, login with auto/manual captcha, error detection |
 | `cas_login_requests.py` | Compat layer: HTTP retry logic, token cache, network time sync, re-exports from `cas_login` and `booking_api` |
 | `booking_api.py` | Resource queries, time slot queries, appointment creation, availability computation (parallel via ThreadPoolExecutor + shared Session) |
 | `cas_manager.py` | `BookingManager` singleton: job create/track/stop, DB persistence, scheduled/immediate booking orchestration |
 | `cas_ocr.py` | NCNN-based OCR using ResNet models for captcha solving |
-| `core_utils.py` | Thread-safe SQLite `DatabasePool`, custom exceptions, error handling decorators, password obfuscation |
+| `core_utils.py` | Thread-safe SQLite `DatabasePool`, custom exceptions (`BookingError`, `DatabaseError`, `LoginError`, `ResourceLockedError`), error handling decorators (`handle_errors`, `db_operation`), password obfuscation |
 | `config.py` | Environment configuration from `.env` |
 
 ### Module Dependencies
@@ -82,7 +82,6 @@ cas_login → cas_ocr, config
 - **Token Caching**: `get_token_cached()` per-user dict with configurable TTL (default 900s), thread-safe
 - **Profile Caching**: `_TOKEN_PROFILE_CACHE` stores user profile from JWT claims
 - **Public Availability Cache**: `_avail_public_cache` keyed by bookdate (60s TTL), shared across all users — slots data is the same for everyone; only `bookedByMe` is queried per-user on cache HIT
-- **Per-User Availability Cache**: `_availability_cache` (legacy, keyed by token+bookdate) retained for compat but no longer used in the availability endpoint
 - **Shared HTTP Session**: `_shared_session()` creates `requests.Session` with connection pool (20 conns) for reuse across parallel GraphQL queries within a single availability request
 - **GraphQL Request Helper**: `_make_graphql_request()` centralizes retry logic (2 attempts, 0.3s backoff), SSL error detection, and slow-query logging (>500ms)
 - **Resource Locking**: asyncio locks per `(resources_name, bookdate, kssj, jssj)` prevent duplicate concurrent bookings; separate thread locks for sync code
@@ -131,3 +130,20 @@ Located in `model/` directory (gitignored):
 ### Port Convention
 
 Dev server defaults to port 5002 (`__main__` block, overridable via `SERVER_PORT` env var). Docker/production uses port 5000 (`SERVER_PORT=5000` in docker-compose).
+
+## Code Maintenance
+
+### Recently Removed Dead Code (2026-05-28)
+
+The following unused code was removed after verification:
+
+| File | Removed Items |
+|------|---------------|
+| `core_utils.py` | `error_response()`, `error_response_from_exception()`, `retry_on_error()`, `PermissionDeniedError`, `ResourceAlreadyBookedError`, `JobNotFoundError` |
+| `config.py` | `LOCK_MAX_AGE_SEC` (not wired to any code) |
+| `cas_ocr.py` | `draw_split_lines_on_image()` (debug helper) |
+| `booking_api.py` | `check_resource_availability_on_date()`, `find_resources_id_by_name()`, `demo_check_availability()` (old query functions) |
+| `cas_login_requests.py` | `book_task_with_network_date()`, `run_concurrent_booking_threads()`, `test_user_info()`, `num_threads`, `barrier`, `__main__` block (legacy booking logic replaced by cas_manager) |
+| `server_models.py` | `_availability_cache`, `_availability_locks`, `_availability_guard`, `_availability_ttl_sec`, `_availability_cleanup()`, `_get_avail_lock()`, `_convert_to_minimal()` (legacy per-user cache system) |
+
+See `dead-code-analysis.md` for detailed evidence and grep traces.

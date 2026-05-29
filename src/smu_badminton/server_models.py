@@ -42,7 +42,7 @@ class BookResponse(BaseModel):
 
 class ScheduleRequest(BookRequest):
     target_time_str: str = Field(..., description="目标开抢时间，格式 HH:MM:SS")
-    num_threads: int = Field(5, ge=1, le=20, description="并发线程数")
+    num_threads: int = Field(5, ge=1, le=5, description="并发线程数")  # 限制 1-5
     run_async: bool = Field(False, description="是否后台异步执行（立即返回）")
 
 
@@ -95,6 +95,7 @@ class StopJobRequest(BaseModel):
 
 class UpdateConfigRequest(BaseModel):
     login_url: str = Field(..., description="新的 CAS 登录 URL")
+    current_username: str = Field(..., description="当前操作用户名，用于权限验证")
 
 
 class CaptchaRequest(BaseModel):
@@ -175,17 +176,37 @@ class RateLimitMiddleware(BaseHTTPMiddleware):
 
     @staticmethod
     def _get_client_ip(request: Request) -> str:
-        # 优先从代理头部获取真实 IP
+        """获取客户端真实 IP。
+
+        只有在配置了可信代理时才信任 X-Forwarded-For。
+        """
+        from .config import TRUSTED_PROXIES
+
+        # 获取直接连接的 IP
+        direct_ip = request.client.host if request.client else "unknown"
+
+        # 如果没有配置可信代理，直接使用直接连接 IP
+        if not TRUSTED_PROXIES:
+            return direct_ip
+
+        # 检查直接连接是否来自可信代理
+        if direct_ip not in TRUSTED_PROXIES:
+            return direct_ip  # 不信任此代理，使用直接 IP
+
+        # 信任此代理，解析 X-Forwarded-For
         xff = request.headers.get("x-forwarded-for") or request.headers.get("X-Forwarded-For")
         if xff:
-            # 取第一个非空 IP
-            ip = xff.split(",")[0].strip()
-            if ip:
-                return ip
+            # 取最后一个非可信代理的 IP（最接近客户端）
+            ips = [ip.strip() for ip in xff.split(",")]
+            for ip in reversed(ips):
+                if ip and ip not in TRUSTED_PROXIES:
+                    return ip
+
         xreal = request.headers.get("x-real-ip") or request.headers.get("X-Real-IP")
         if xreal:
             return xreal.strip()
-        return request.client.host if request.client else "unknown"
+
+        return direct_ip
 
     async def dispatch(self, request: Request, call_next):
         path = request.url.path
@@ -236,8 +257,11 @@ _tlocks: Dict[Tuple[str, str, str, str], threading.Lock] = {}
 _tlocks_guard = threading.Lock()
 
 
-async def _acquire_lock(key: Tuple[str, str, str, str]) -> asyncio.Lock:
-    """获取或创建资源锁。"""
+async def get_resource_lock(key: Tuple[str, str, str, str]) -> asyncio.Lock:
+    """获取或创建资源锁（只获取锁对象，不 acquire）。
+
+    注意：此函数只返回锁对象，调用者需要自行 acquire/release。
+    """
     async with _locks_guard:
         lock = _locks.get(key)
         if lock is None:
@@ -245,6 +269,10 @@ async def _acquire_lock(key: Tuple[str, str, str, str]) -> asyncio.Lock:
             _locks[key] = lock
             _lock_timestamps[key] = _time.time()
         return lock
+
+
+# 保持向后兼容的别名
+_acquire_lock = get_resource_lock
 
 
 def _get_tlock(key: Tuple[str, str, str, str]) -> threading.Lock:
@@ -284,15 +312,6 @@ async def _locks_cleanup():
                 for k in expired_tlocks[:-100]:
                     _tlocks.pop(k, None)
                 logger.info(f"清理了 {len(expired_tlocks) - 100} 个过期线程锁")
-
-        # 清理可用性缓存锁
-        async with _availability_guard:
-            avail_keys = list(_availability_locks.keys())
-            # 保留最多50个
-            if len(avail_keys) > 50:
-                for k in avail_keys[:-50]:
-                    if k not in _availability_cache:  # 没有缓存的锁可以删除
-                        _availability_locks.pop(k, None)
 
 
 # ============= 任务管理（内存级） =============
@@ -339,61 +358,8 @@ _avail_public_cache: Dict[str, Dict[str, object]] = {}
 _avail_public_lock = asyncio.Lock()
 _avail_public_ttl_sec = 60.0
 
-# 兼容旧代码的变量（已不使用，但保留导出避免报错）
-_availability_cache: Dict[Tuple[str, str], Dict[str, object]] = {}
-_availability_locks: Dict[Tuple[str, str], asyncio.Lock] = {}
-_availability_guard = asyncio.Lock()
-_availability_ttl_sec = 60.0
 
-
-async def _availability_cleanup():
-    """定期清理可用性缓存。"""
-    while True:
-        await asyncio.sleep(60)
-        now = _time.time()
-        async with _availability_guard:
-            keys = list(_availability_cache.keys())
-        for k in keys:
-            lk = await _get_avail_lock(k)
-            async with lk:
-                entry = _availability_cache.get(k)
-                if not entry:
-                    continue
-                ts = float(entry.get("ts", 0))
-                if now - ts > 10 * _availability_ttl_sec:
-                    _availability_cache.pop(k, None)
-
-
-async def _get_avail_lock(key: Tuple[str, str]) -> asyncio.Lock:
-    """获取可用性缓存锁。"""
-    async with _availability_guard:
-        lk = _availability_locks.get(key)
-        if lk is None:
-            lk = asyncio.Lock()
-            _availability_locks[key] = lk
-        return lk
-
-
-def _convert_to_minimal(data: List[dict]) -> List[dict]:
-    """将完整数据转换为精简格式。"""
-    return [
-        {
-            "resources_id": r.get("resources_id"),
-            "resources_name": r.get("resources_name"),
-            "slots": [
-                {
-                    "kssj": s.get("kssj"),
-                    "jssj": s.get("jssj"),
-                    "canAppointmentNumber": s.get("canAppointmentNumber"),
-                }
-                for s in (r.get("slots") or [])
-            ],
-        }
-        for r in data
-    ]
-
-
-# ============= 向后兼容导出 =============
+# ============= 任务管理（内存级） =============
 
 __all__ = [
     # 模型
@@ -404,12 +370,11 @@ __all__ = [
     # 中间件
     "MetricsMiddleware", "RateLimitMiddleware",
     # 锁管理
-    "_acquire_lock", "_get_tlock", "_locks_cleanup", "_locks", "_tlocks", "_locks_guard", "_tlocks_guard", "_lock_timestamps", "_LOCK_MAX_AGE_SEC",
+    "get_resource_lock", "_acquire_lock", "_get_tlock", "_locks_cleanup", "_locks", "_tlocks", "_locks_guard", "_tlocks_guard", "_lock_timestamps", "_LOCK_MAX_AGE_SEC",
     # 任务管理
     "_new_job", "_set_job", "_append_log", "_jobs", "_jobs_guard",
     # 可用性缓存
-    "_availability_cache", "_availability_locks", "_availability_guard", "_availability_ttl_sec",
-    "_availability_cleanup", "_get_avail_lock", "_convert_to_minimal",
+    "_avail_public_cache", "_avail_public_lock", "_avail_public_ttl_sec",
     # 指标
     "_metrics", "_metrics_lock",
     # 限流

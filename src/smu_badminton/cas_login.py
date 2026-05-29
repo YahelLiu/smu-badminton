@@ -2,6 +2,11 @@
 CAS 认证流程模块。
 
 包含 CAS 登录、重定向解析、OIDC token 提取等功能。
+
+接口规范：
+- LoginResult 为统一返回结构
+- extract_oidc_tokens 失败返回 None（而非空字典）
+- 所有公开函数参数顺序：必需参数在前，可选参数在后
 """
 import requests
 from urllib.parse import urlparse, parse_qs, urlencode, quote, urljoin, unquote
@@ -12,6 +17,7 @@ import time
 import logging
 from typing import Any, Dict, Tuple, Optional
 from enum import Enum
+from dataclasses import dataclass
 
 from .config import (
     WF_ORIGIN,
@@ -19,7 +25,6 @@ from .config import (
     CAS_ORIGIN,
     CAS_CAPTCHA_URL,
     OAUTH_CLIENT_ID,
-    CAS_LOGIN_STABLE_FIRST,
 )
 
 logger = logging.getLogger(__name__)
@@ -34,17 +39,24 @@ class LoginErrorType(Enum):
     UNKNOWN_ERROR = "unknown_error"  # 未知错误
 
 
+@dataclass
 class LoginResult:
-    """登录结果。"""
-    def __init__(self, error_type: LoginErrorType, tokens: Optional[Dict] = None,
-                 session: Optional[requests.Session] = None, message: str = ""):
-        self.error_type = error_type
-        self.tokens = tokens
-        self.session = session
-        self.message = message
+    """登录结果。
+
+    Attributes:
+        error_type: 错误类型
+        tokens: 成功时返回的 token 字典，包含 access_token 和 id_token
+        session: requests.Session 对象（可用于后续请求）
+        message: 错误信息
+    """
+    error_type: LoginErrorType = LoginErrorType.UNKNOWN_ERROR
+    tokens: Optional[Dict[str, str]] = None
+    session: Optional[requests.Session] = None
+    message: str = ""
 
     @property
     def success(self) -> bool:
+        """是否登录成功。"""
         return self.error_type == LoginErrorType.SUCCESS and self.tokens is not None
 
 
@@ -134,95 +146,127 @@ def follow_redirects(session, start_url):
     return current_url, ""
 
 
-def extract_oidc_tokens(url):
-    """从 URL 的 fragment 或 query 参数中提取 OIDC token。"""
+def extract_oidc_tokens(url: str) -> Optional[Dict[str, str]]:
+    """
+    从 URL 的 fragment 或 query 参数中提取 OIDC token。
+
+    Args:
+        url: 包含 token 的 URL
+
+    Returns:
+        包含 access_token 和 id_token 的字典，失败返回 None（不返回空字典）
+    """
     parsed_url = urlparse(url)
+    tokens: Dict[str, str] = {}
 
     # 检查 URL fragment 是否包含 token
     if parsed_url.fragment:
         fragment_params = parse_qs(parsed_url.fragment)
-
-        tokens = {}
         if 'access_token' in fragment_params:
             tokens['access_token'] = fragment_params['access_token'][0]
         if 'id_token' in fragment_params:
             tokens['id_token'] = fragment_params['id_token'][0]
 
-        return tokens
-
-    # 检查 URL query 参数是否包含 token
-    query_params = parse_qs(parsed_url.query)
-    tokens = {}
-    if 'access_token' in query_params:
-        tokens['access_token'] = query_params['access_token'][0]
-    if 'id_token' in query_params:
-        tokens['id_token'] = query_params['id_token'][0]
+    # 如果 fragment 中没有，检查 URL query 参数
+    if not tokens and parsed_url.query:
+        query_params = parse_qs(parsed_url.query)
+        if 'access_token' in query_params:
+            tokens['access_token'] = query_params['access_token'][0]
+        if 'id_token' in query_params:
+            tokens['id_token'] = query_params['id_token'][0]
 
     return tokens if tokens else None
 
 
-def get_captcha_and_params(login_url, captcha_url):
-    """从 WF 流程解析 CAS 登录地址，并获取验证码与 execution。"""
+def _extract_tokens_after_login(session: requests.Session, cas_login_url: str, post_resp: requests.Response) -> Optional[Dict]:
+    """从登录响应中提取 OIDC tokens。
+
+    处理两种情况：
+    1. 直接从重定向 URL 的 fragment 中提取
+    2. 通过 ticket 交换 token
+
+    Args:
+        session: 已认证的会话
+        cas_login_url: CAS 登录 URL
+        post_resp: 登录 POST 响应
+
+    Returns:
+        tokens 字典或 None
+    """
+    # 检查是否登录成功（重定向）
+    if post_resp.status_code not in (301, 302, 303) or "Location" not in post_resp.headers:
+        return None
+
+    redirect_url = _absolute_url(cas_login_url, post_resp.headers["Location"])
+    final_url, _ = follow_redirects(session, redirect_url)
+
+    # 尝试直接从 URL 提取 token
+    tokens = extract_oidc_tokens(final_url)
+    if tokens:
+        return tokens
+
+    # 尝试通过 ticket 交换 token
+    parsed = urlparse(final_url)
+    query = parse_qs(parsed.query)
+    if "redirect_uri" in query and "ticket" in query:
+        redirect_uri = unquote(query["redirect_uri"][0])
+        ticket = query["ticket"][0]
+        oidc_url = f"{redirect_uri}&ticket={ticket}"
+        try:
+            r2 = session.get(oidc_url, allow_redirects=True, timeout=20)
+            tokens = extract_oidc_tokens(r2.url)
+            if tokens:
+                return tokens
+        except Exception as e:
+            _debug(f"token exchange via ticket failed: {e}")
+
+    return None
+
+
+def _prepare_login_session_core(login_url: str, captcha_url: str | None = None) -> Tuple[requests.Session, str, str, bytes, str]:
+    """准备登录会话的核心逻辑。
+
+    Args:
+        login_url: 登录入口 URL
+        captcha_url: 验证码 URL（可选）
+
+    Returns:
+        Tuple: (session, cas_login_url, execution_value, captcha_image_bytes, login_page_html)
+    """
     session = requests.Session()
     captcha_url = (captcha_url or CAS_CAPTCHA_URL).strip()
+    headers = {
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/137.0.0.0 Safari/537.36"
+    }
 
+    # 解析 CAS 登录 URL
     cas_login_url = _resolve_cas_login_url(session, login_url, timeout=20)
 
-    # 1) 拉取 CAS 登录页并解析隐藏参数
-    resp = session.get(cas_login_url, timeout=20)
-    tree = html.fromstring(resp.text)
+    # 获取登录页面
+    login_resp = session.get(cas_login_url, headers=headers, timeout=20)
+    login_page_html = login_resp.text
 
-    execution_candidates = tree.xpath("//input[@name='execution']/@value")
-    if not execution_candidates:
-        execution_candidates = tree.xpath('//*[@id="login-form-controls"]//input[@name="execution"]/@value')
-    if not execution_candidates:
-        raise RuntimeError("execution not found on CAS login page")
-    execution_value = execution_candidates[0]
+    # 提取 execution 参数
+    execution_value = _stable_extract_execution(login_page_html)
+    if not execution_value:
+        raise RuntimeError("无法获取 execution 参数")
 
-    # 2) 下载验证码并在内存中 OCR
-    captcha_response = session.get(captcha_url, timeout=15)
-    result, *_ = predict_validate_code(captcha_response.content)
+    # 获取验证码图片
+    captcha_resp = session.get(captcha_url, headers=headers, timeout=15)
+    captcha_image = captcha_resp.content
 
+    return session, cas_login_url, execution_value, captcha_image, login_page_html
+
+
+def get_captcha_and_params(login_url, captcha_url):
+    """从 WF 流程解析 CAS 登录地址，并获取验证码与 execution。"""
+    session, cas_login_url, execution_value, captcha_image, _ = _prepare_login_session_core(login_url, captcha_url)
+    # OCR 识别验证码
+    result, *_ = predict_validate_code(captcha_image)
     return session, cas_login_url, execution_value, result
 
 
-def cas_login(login_url, captcha_url, username, password):
-    """通过 WF->SSO->CAS 重定向链登录并获取 OIDC token。"""
-    session, cas_login_url, execution_value, captcha = get_captcha_and_params(login_url, captcha_url)
-
-    data = {
-        'username': username,
-        'password': password,
-        'execution': execution_value,
-        '_eventId': 'submit',
-        'geolocation': '',
-        'validateCode': captcha,
-    }
-
-    post_resp = session.post(cas_login_url, data=data, allow_redirects=False, timeout=20)
-    if post_resp.status_code not in (301, 302, 303) or 'Location' not in post_resp.headers:
-        _debug(f"cas_login failed status={post_resp.status_code}")
-        return session, None
-
-    redirect_url = _absolute_url(cas_login_url, post_resp.headers['Location'])
-    final_url, _ = follow_redirects(session, redirect_url)
-    tokens_direct = extract_oidc_tokens(final_url)
-    if tokens_direct:
-        return session, tokens_direct
-
-    parsed = urlparse(final_url)
-    query = parse_qs(parsed.query)
-    if 'redirect_uri' in query and 'ticket' in query:
-        redirect_uri = unquote(query['redirect_uri'][0])
-        ticket = query['ticket'][0]
-        oidc_url = f"{redirect_uri}&ticket={ticket}"
-        resp = session.get(oidc_url, allow_redirects=True, timeout=20)
-        tokens = extract_oidc_tokens(resp.url)
-        if tokens:
-            return session, tokens
-
-    _debug("cas_login finished but tokens not found")
-    return session, None
+# cas_login 已移除，统一使用 cas_login_stable
 
 
 # ---- 稳定登录兜底实现 ----
@@ -261,9 +305,12 @@ def _stable_download_captcha(session: requests.Session, captcha_url: str) -> str
     return code
 
 
-def cas_login_stable(login_url, captcha_url, username, password):
+def cas_login_stable(login_url, captcha_url, username, password) -> LoginResult:
     """更稳健的 WF->SSO->CAS 重定向链登录实现。"""
     session = None
+    last_error_type = LoginErrorType.UNKNOWN_ERROR
+    last_message = "登录失败"
+
     for _attempt in range(1, 4):
         session = requests.Session()
         headers_get = {
@@ -274,10 +321,13 @@ def cas_login_stable(login_url, captcha_url, username, password):
             login_resp = session.get(cas_url, headers=headers_get, timeout=20)
         except Exception as e:
             _debug(f"cas_login_stable resolve/get failed: {e}")
+            last_error_type = LoginErrorType.NETWORK_ERROR
+            last_message = str(e)
             continue
 
         execution_value = _stable_extract_execution(login_resp.text)
         if not execution_value:
+            last_message = "无法获取 execution 参数"
             continue
 
         event_order = _stable_detect_event_order(login_resp.text)
@@ -299,50 +349,50 @@ def cas_login_stable(login_url, captcha_url, username, password):
                 "geolocation": "",
                 "validateCode": captcha,
             }
-            post_resp = session.post(cas_url, data=data, headers=headers_post, allow_redirects=False, timeout=20)
-            if post_resp.status_code in (301, 302, 303) and "Location" in post_resp.headers:
-                redirect_url = _absolute_url(cas_url, post_resp.headers["Location"])
-                final_url, _ = follow_redirects(session, redirect_url)
-                tokens_direct = extract_oidc_tokens(final_url)
-                if tokens_direct:
-                    return session, tokens_direct
+            try:
+                post_resp = session.post(cas_url, data=data, headers=headers_post, allow_redirects=False, timeout=20)
+            except Exception as e:
+                last_error_type = LoginErrorType.NETWORK_ERROR
+                last_message = str(e)
+                continue
 
-                parsed = urlparse(final_url)
-                query = parse_qs(parsed.query)
-                if "redirect_uri" in query and "ticket" in query:
-                    redirect_uri = unquote(query["redirect_uri"][0])
-                    ticket = query["ticket"][0]
-                    oidc_url = f"{redirect_uri}&ticket={ticket}"
-                    r2 = session.get(oidc_url, allow_redirects=True, timeout=20)
-                    tokens = extract_oidc_tokens(r2.url)
-                    if tokens:
-                        return session, tokens
-                return session, None
+            tokens = _extract_tokens_after_login(session, cas_url, post_resp)
+            if tokens:
+                return LoginResult(LoginErrorType.SUCCESS, tokens=tokens, session=session)
+
+            # 检测错误类型
+            if post_resp.status_code == 200:
+                last_error_type = _detect_login_error(post_resp.text)
+                last_message = f"登录失败: {last_error_type.value}"
 
         time.sleep(0.5)
 
-    return session or requests.Session(), None
+    return LoginResult(last_error_type, session=session or requests.Session(), message=last_message)
 
 
-def login_with_retry(login_url, captcha_url, username, password, max_retries=5):
-    """带重试的登录。"""
-    prefer_stable_first = CAS_LOGIN_STABLE_FIRST
-    primary = cas_login_stable if prefer_stable_first else cas_login
-    secondary = cas_login if prefer_stable_first else cas_login_stable
+def login_with_retry(login_url, captcha_url, username, password, max_retries=3) -> Optional[Dict]:
+    """带重试的登录。返回 tokens 或 None。
 
+    总尝试次数 = max_retries × 3 (cas_login_stable 内部重试)
+    默认 3 × 3 = 9 次，控制在 10 次以内。
+    """
     for attempt in range(1, max_retries + 1):
         _debug(f"login attempt {attempt}/{max_retries}")
 
-        for login_func, tag in ((primary, "primary"), (secondary, "fallback")):
-            try:
-                _debug(f"login path={tag}, func={login_func.__name__}")
-                _session, tokens = login_func(login_url, captcha_url, username, password)
-            except Exception as e:
-                _debug(f"login func={login_func.__name__} exception: {e}")
-                tokens = None
+        try:
+            result = cas_login_stable(login_url, captcha_url, username, password)
+        except Exception as e:
+            _debug(f"cas_login_stable exception: {e}")
+            time.sleep(0.3)
+            continue
 
-            if tokens and tokens.get("access_token"):
-                return tokens
+        if result.success and result.tokens and result.tokens.get("access_token"):
+            return result.tokens
+
+        # 密码错误不重试
+        if result.error_type == LoginErrorType.PASSWORD_ERROR:
+            logger.warning("密码错误，停止重试")
+            return None
 
         time.sleep(0.3)
 
@@ -398,29 +448,8 @@ def prepare_login_session(login_url: str, captcha_url: str | None = None) -> Tup
     Returns:
         Tuple: (session, cas_login_url, execution_value, captcha_image_bytes, login_page_html)
     """
-    session = requests.Session()
-    captcha_url = (captcha_url or CAS_CAPTCHA_URL).strip()
-    headers = {
-        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/137.0.0.0 Safari/537.36"
-    }
-
-    # 解析 CAS 登录 URL
-    cas_login_url = _resolve_cas_login_url(session, login_url, timeout=20)
-
-    # 获取登录页面
-    login_resp = session.get(cas_login_url, headers=headers, timeout=20)
-    login_page_html = login_resp.text
-
-    # 提取 execution 参数
-    execution_value = _stable_extract_execution(login_page_html)
-    if not execution_value:
-        raise RuntimeError("无法获取 execution 参数")
-
-    # 获取验证码图片 - 使用同一个 session 确保验证码与登录页面匹配
-    captcha_resp = session.get(captcha_url, headers=headers, timeout=15)
-    captcha_image = captcha_resp.content
-    logger.info(f"验证码图片获取成功, 大小: {len(captcha_image)} bytes, URL: {captcha_url}")
-
+    session, cas_login_url, execution_value, captcha_image, login_page_html = _prepare_login_session_core(login_url, captcha_url)
+    logger.info(f"验证码图片获取成功, 大小: {len(captcha_image)} bytes")
     return session, cas_login_url, execution_value, captcha_image, login_page_html
 
 
@@ -476,37 +505,15 @@ def attempt_login_with_captcha(
             post_resp = session.post(
                 cas_login_url, data=data, headers=headers, allow_redirects=False, timeout=20
             )
-            logger.info(f"登录请求发送: username={username}, captcha={captcha_code}, execution={execution_value[:20]}...")
-            logger.info(f"登录响应状态码: {post_resp.status_code}, Location: {post_resp.headers.get('Location', 'None')}")
+            logger.info(f"登录请求发送: status={post_resp.status_code}")
         except Exception as e:
             logger.warning(f"登录请求异常: {e}")
             return LoginResult(LoginErrorType.NETWORK_ERROR, message=str(e))
 
-        # 检查是否登录成功（重定向）
-        if post_resp.status_code in (301, 302, 303) and "Location" in post_resp.headers:
-            redirect_url = _absolute_url(cas_login_url, post_resp.headers["Location"])
-            final_url, _ = follow_redirects(session, redirect_url)
-            tokens_direct = extract_oidc_tokens(final_url)
-            if tokens_direct:
-                return LoginResult(LoginErrorType.SUCCESS, tokens=tokens_direct, session=session)
-
-            # 尝试通过 ticket 获取 token
-            parsed = urlparse(final_url)
-            query = parse_qs(parsed.query)
-            if "redirect_uri" in query and "ticket" in query:
-                redirect_uri = unquote(query["redirect_uri"][0])
-                ticket = query["ticket"][0]
-                oidc_url = f"{redirect_uri}&ticket={ticket}"
-                try:
-                    r2 = session.get(oidc_url, allow_redirects=True, timeout=20)
-                    tokens = extract_oidc_tokens(r2.url)
-                    if tokens:
-                        return LoginResult(LoginErrorType.SUCCESS, tokens=tokens, session=session)
-                except Exception as e:
-                    logger.warning(f"获取 token 失败: {e}")
-
-            # 有重定向但没有 token，可能是其他问题
-            return LoginResult(LoginErrorType.UNKNOWN_ERROR, session=session, message="重定向成功但未获取到 token")
+        # 尝试提取 token
+        tokens = _extract_tokens_after_login(session, cas_login_url, post_resp)
+        if tokens:
+            return LoginResult(LoginErrorType.SUCCESS, tokens=tokens, session=session)
 
         # 登录失败，检查错误类型
         error_type = _detect_login_error(post_resp.text)
@@ -551,7 +558,7 @@ def login_with_auto_captcha(
 
             # OCR 识别验证码
             captcha_code, expr, *_ = predict_validate_code(captcha_image)
-            logger.info(f"OCR 识别验证码: {captcha_code}, 表达式: {expr}, 图片大小: {len(captcha_image)} bytes")
+            logger.info(f"OCR 识别验证码: 表达式={expr}, 图片大小={len(captcha_image)} bytes")
 
             # 尝试登录
             result = attempt_login_with_captcha(

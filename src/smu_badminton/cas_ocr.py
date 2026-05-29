@@ -93,13 +93,7 @@ def calculate_operator(left, right, operator_type):
         return left * right
     else:
         return 0
-def draw_split_lines_on_image(image, key_points, color=(0, 0, 255), thickness=2):
-    h, w = image.shape[:2]
-    img_copy = image.copy()
-    for x_ratio in key_points:
-        x = int(w * x_ratio)
-        cv2.line(img_copy, (x, 0), (x, h), color, thickness)
-    return img_copy
+
 def predict_validate_code(img_input):
     """
     识别验证码

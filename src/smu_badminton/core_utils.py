@@ -50,22 +50,6 @@ class ResourceLockedError(BookingError):
         super().__init__(message, "RESOURCE_LOCKED", details)
 
 
-class ResourceAlreadyBookedError(BookingError):
-    """资源已被预约异常"""
-    def __init__(self, message: str = "该时间段已被预约", details: Optional[dict] = None):
-        super().__init__(message, "RESOURCE_ALREADY_BOOKED", details)
-
-
-class JobNotFoundError(BookingError):
-    """任务不存在异常"""
-    def __init__(self, job_id: str):
-        super().__init__(f"任务不存在: {job_id}", "JOB_NOT_FOUND", {"job_id": job_id})
-
-
-class PermissionDeniedError(BookingError):
-    """权限不足异常"""
-    def __init__(self, message: str = "权限不足", details: Optional[dict] = None):
-        super().__init__(message, "PERMISSION_DENIED", details)
 
 
 # ============= 错误处理装饰器 =============
@@ -265,80 +249,28 @@ def success_response(data: Any = None, message: str = "操作成功") -> dict:
     }
 
 
-def error_response(error: BookingError) -> dict:
-    """错误响应"""
-    return {
-        "ok": False,
-        "error": error.code,
-        "message": error.message,
-        "details": error.details
-    }
-
-
-def error_response_from_exception(e: Exception) -> dict:
-    """从异常创建错误响应"""
-    if isinstance(e, BookingError):
-        return error_response(e)
-    else:
-        # 未知异常
-        return {
-            "ok": False,
-            "error": "UNKNOWN_ERROR",
-            "message": str(e),
-            "details": {}
-        }
-
-
-# ============= 重试装饰器 =============
-
-def retry_on_error(max_retries: int = 3, delay: float = 0.5, exceptions: tuple = (Exception,)):
-    """
-    失败重试装饰器
-    
-    Args:
-        max_retries: 最大重试次数
-        delay: 重试延迟（秒）
-        exceptions: 需要重试的异常类型
-    """
-    def decorator(func: Callable) -> Callable:
-        @wraps(func)
-        def wrapper(*args, **kwargs):
-            last_exception = None
-            for attempt in range(max_retries + 1):
-                try:
-                    return func(*args, **kwargs)
-                except exceptions as e:
-                    last_exception = e
-                    if attempt < max_retries:
-                        logger.warning(
-                            f"{func.__name__} 失败，重试 {attempt + 1}/{max_retries}: {str(e)}"
-                        )
-                        time.sleep(delay * (attempt + 1))  # 指数退避
-                    else:
-                        logger.error(f"{func.__name__} 失败，已达最大重试次数")
-            
-            raise last_exception
-        return wrapper
-    return decorator
-
 
 # ============= 全局数据库连接池单例 =============
 
 _db_pool_instance: Optional['DatabasePool'] = None
 _db_pool_lock = threading.Lock()
+_db_pool_path: Optional[str] = None  # 记录已初始化的路径
 
 
 def get_db_pool(db_path: str = None) -> 'DatabasePool':
     """
-    获取全局数据库连接池单例
+    获取全局数据库连接池单例。
 
     Args:
         db_path: 数据库路径，默认为 data/data.db
 
     Returns:
         DatabasePool 实例
+
+    Raises:
+        ValueError: 如果尝试用不同路径初始化已存在的单例
     """
-    global _db_pool_instance
+    global _db_pool_instance, _db_pool_path
     with _db_pool_lock:
         if _db_pool_instance is None:
             if db_path is None:
@@ -347,6 +279,12 @@ def get_db_pool(db_path: str = None) -> 'DatabasePool':
             # 确保目录存在
             os.makedirs(os.path.dirname(db_path), exist_ok=True)
             _db_pool_instance = DatabasePool(db_path)
+            _db_pool_path = db_path
+        elif db_path is not None and db_path != _db_pool_path:
+            raise ValueError(
+                f"数据库连接池已初始化为 {_db_pool_path}，"
+                f"不能重复初始化为 {db_path}"
+            )
         return _db_pool_instance
 
 
@@ -381,7 +319,7 @@ def init_db_tables():
             """
             CREATE TABLE IF NOT EXISTS scheduled_jobs (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
-                job_id TEXT NOT NULL,
+                job_id TEXT NOT NULL UNIQUE,
                 login_url TEXT,
                 captcha_url TEXT,
                 username TEXT,
@@ -397,22 +335,41 @@ def init_db_tables():
             );
             """
         )
+        # job_id 唯一索引（显式创建，确保存在）
+        conn.execute("CREATE UNIQUE INDEX IF NOT EXISTS idx_jobs_job_id ON scheduled_jobs(job_id);")
         conn.execute("CREATE INDEX IF NOT EXISTS idx_jobs_status ON scheduled_jobs(status);")
         conn.execute("CREATE INDEX IF NOT EXISTS idx_jobs_created ON scheduled_jobs(created_at);")
         conn.execute(
             "CREATE INDEX IF NOT EXISTS idx_jobs_params ON scheduled_jobs(username, bookdate, kssj, jssj, resources_name);"
         )
 
+        # 创建用户账号表（保存登录成功的账号密码）
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS user_accounts (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                username TEXT NOT NULL UNIQUE,
+                password TEXT NOT NULL,
+                login_url TEXT,
+                captcha_url TEXT,
+                created_at REAL NOT NULL,
+                updated_at REAL NOT NULL
+            );
+            """
+        )
+        conn.execute("CREATE UNIQUE INDEX IF NOT EXISTS idx_accounts_username ON user_accounts(username);")
+
     logger.info("数据库表初始化完成")
 
 
 def close_db_pool():
     """关闭全局数据库连接池"""
-    global _db_pool_instance
+    global _db_pool_instance, _db_pool_path
     with _db_pool_lock:
         if _db_pool_instance:
             _db_pool_instance.close_all()
             _db_pool_instance = None
+            _db_pool_path = None
             logger.info("全局数据库连接池已关闭")
 
 
@@ -442,13 +399,16 @@ def obfuscate_password(password: str) -> str:
 
 def deobfuscate_password(obfuscated: str) -> str:
     """
-    还原混淆的密码
+    还原混淆的密码。
 
     Args:
         obfuscated: 混淆后的字符串
 
     Returns:
-        原始密码
+        原始密码，解密失败时返回空字符串
+
+    Note:
+        解密失败时不返回原文，避免混淆数据被当作密码使用。
     """
     if not obfuscated:
         return ""
@@ -456,39 +416,6 @@ def deobfuscate_password(obfuscated: str) -> str:
     try:
         decoded = base64.b64decode(obfuscated.encode()).decode()
         return ''.join(chr(ord(c) ^ ord(key[i % len(key)])) for i, c in enumerate(decoded))
-    except Exception:
-        # 如果解密失败，可能是明文密码（兼容旧数据）
-        return obfuscated
-
-
-# ============= 使用示例（注释） =============
-
-"""
-# 1. 使用自定义异常
-def check_permission(user_id: str, resource_id: str):
-    if not has_permission(user_id, resource_id):
-        raise PermissionDeniedError("无权访问该资源", {"user_id": user_id, "resource_id": resource_id})
-
-# 2. 使用错误处理装饰器
-@handle_errors(default_return={}, log_error=True)
-def get_user_bookings(user_id: str):
-    # 这里的异常会被自动捕获和记录
-    return fetch_from_db(user_id)
-
-# 3. 使用全局数据库连接池
-from .core_utils import get_db_pool, init_db_tables
-
-# 启动时初始化表
-init_db_tables()
-
-# 使用连接池
-pool = get_db_pool()
-with pool.get_connection() as conn:
-    conn.execute("INSERT INTO bookings VALUES (?, ?)", (user_id, date))
-
-# 4. 使用重试装饰器
-@retry_on_error(max_retries=3, delay=1.0, exceptions=(sqlite3.OperationalError,))
-def save_booking(data):
-    # 如果数据库锁定，会自动重试
-    pass
-"""
+    except Exception as e:
+        logger.warning(f"密码解混淆失败: {e}")
+        return ""

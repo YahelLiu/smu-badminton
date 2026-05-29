@@ -2,32 +2,63 @@
 预约 API 和可用性查询模块。
 
 包含用户信息解析、预约 API 调用、可用性查询等功能。
+
+接口规范：
+- 列表类函数失败返回 []（空列表）
+- 对象类函数失败返回 None
+- 写操作返回统一结构 {"code": str, "messages": list}
+- 所有公开函数参数顺序：必需参数在前，可选参数在后（id_token 默认 ""，session 默认 None）
 """
 import requests
 import time
-import json
-import base64
 import logging
-from typing import Any, Dict
-from datetime import datetime
+from typing import Any, Dict, List, Optional, Tuple
+from datetime import datetime, timezone, timedelta
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
 from .config import (
     WF_ORIGIN,
     WF_API_URL,
     BADMINTON_TYPE_ID,
-    TOKEN_PROFILE_TTL_SEC,
-    DEFAULT_DEPT_CODE,
-    DEFAULT_DEPT_NAME,
-    DEFAULT_DEPT_NAME_EN,
-    DEFAULT_USER_EMAIL,
-    DEFAULT_USER_PHONE,
+)
+from .token_profile import (
+    cache_profile_from_tokens,
+    get_profile_by_access_token,
+    build_user_info_from_profile,
 )
 
 logger = logging.getLogger(__name__)
 
 
-def _debug(msg: str):
+# ============= HTTP 请求常量和辅助函数 =============
+
+USER_AGENT = (
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+    "AppleWebKit/537.36 (KHTML, like Gecko) "
+    "Chrome/137.0.0.0 Safari/537.36 Edg/137.0.0.0"
+)
+
+# 中国标准时区 (UTC+8)
+_BEIJING_TZ = timezone(timedelta(hours=8))
+
+
+def _bookdate_to_ms(bookdate: str) -> int:
+    """将 YYYY-MM-DD 格式的日期转换为北京时间 00:00:00 的毫秒时间戳。"""
+    dt = datetime.strptime(bookdate, "%Y-%m-%d").replace(tzinfo=_BEIJING_TZ)
+    return int(dt.timestamp() * 1000)
+
+
+def build_headers(token: str) -> Dict[str, str]:
+    """构建 GraphQL 请求的通用 headers。"""
+    return {
+        "Authorization": f"Bearer {token}",
+        "Content-Type": "application/json",
+        "Origin": WF_ORIGIN,
+        "User-Agent": USER_AGENT,
+    }
+
+
+def _debug(msg: str) -> None:
     """调试日志输出。"""
     from .config import BOOKING_DEBUG
     if BOOKING_DEBUG:
@@ -41,143 +72,123 @@ def _graphql_url(id_token: str = "") -> str:
     return WF_API_URL
 
 
-# ============= Token Profile 缓存 =============
-
-_TOKEN_PROFILE_CACHE: Dict[str, Dict[str, Any]] = {}
-_TOKEN_LOCK: Any = None  # 延迟初始化，避免模块导入时的锁问题
-
-
-def _get_token_lock():
-    """延迟初始化 token 锁。"""
-    global _TOKEN_LOCK
-    if _TOKEN_LOCK is None:
-        import threading
-        _TOKEN_LOCK = threading.Lock()
-    return _TOKEN_LOCK
+def _is_ssl_error(error: Exception) -> bool:
+    """判断是否为 SSL 相关错误。"""
+    error_str = str(error).lower()
+    return 'ssl' in error_str or 'eof' in error_str or 'protocol' in error_str
 
 
-def _decode_jwt_payload(token: str) -> Dict[str, Any] | None:
-    """解析 JWT payload（不校验签名）。"""
-    try:
-        parts = token.split(".")
-        if len(parts) < 2:
-            return None
-        payload = parts[1]
-        payload += "=" * (-len(payload) % 4)
-        raw = base64.urlsafe_b64decode(payload.encode("utf-8"))
-        data = json.loads(raw.decode("utf-8"))
-        return data if isinstance(data, dict) else None
-    except Exception:
-        return None
+def _shared_session() -> requests.Session:
+    """创建带连接池的共享 Session，复用 TCP/TLS 连接。"""
+    s = requests.Session()
+    adapter = requests.adapters.HTTPAdapter(pool_connections=20, pool_maxsize=20)
+    s.mount('https://', adapter)
+    s.mount('http://', adapter)
+    return s
 
 
-def _profile_from_claims(claims: Dict[str, Any] | None) -> Dict[str, Any] | None:
-    if not claims:
-        return None
+def _make_graphql_request(
+    session,
+    url: str,
+    headers: Dict[str, str],
+    payload: Dict[str, Any],
+    log_name: str = "",
+    token: str = ""
+) -> Optional[requests.Response]:
+    """使用共享 Session 发送 GraphQL 请求，带重试和 token 自动刷新。
 
-    user_code = (
-        claims.get("userCode")
-        or claims.get("userName")
-        or claims.get("account")
-        or claims.get("loginName")
-        or claims.get("sub")
-    )
-    if not user_code:
-        return None
+    Args:
+        session: requests.Session 或 requests 模块
+        url: GraphQL API URL
+        headers: 请求头
+        payload: 请求体
+        log_name: 日志名称
+        token: 访问令牌（用于自动刷新）
 
-    display_name = claims.get("name") or claims.get("realName") or claims.get("cn") or str(user_code)
-    dept_code = claims.get("deptCode") or DEFAULT_DEPT_CODE
-    dept_name = claims.get("deptName") or DEFAULT_DEPT_NAME
-    dept_name_en = claims.get("deptNameEn") or DEFAULT_DEPT_NAME_EN
-    email = claims.get("email") or DEFAULT_USER_EMAIL or f"{user_code}@stu.shmtu.edu.cn"
-    phone = claims.get("phone") or claims.get("mobile") or claims.get("telephone") or DEFAULT_USER_PHONE
+    Returns:
+        响应对象，失败返回 None
+    """
+    max_retries = 2
+    timeout = 10
 
-    return {
-        "user_code": str(user_code),
-        "display_name": str(display_name),
-        "dept_code": str(dept_code),
-        "dept_name": str(dept_name),
-        "dept_name_en": str(dept_name_en),
-        "email": str(email),
-        "phone": str(phone),
-    }
+    def do_request(current_token: str) -> Optional[requests.Response]:
+        """执行单次请求。"""
+        current_headers = headers.copy()
+        if current_token:
+            current_headers["Authorization"] = f"Bearer {current_token}"
+        return session.post(url, json=payload, headers=current_headers, timeout=timeout)
+
+    for attempt in range(max_retries):
+        try:
+            t0 = time.time()
+            resp = do_request(token)
+            elapsed = (time.time() - t0) * 1000
+            if log_name and elapsed > 500:
+                logger.info("[性能] %s: %.0fms (attempt %d)", log_name, elapsed, attempt + 1)
+            if resp.status_code == 200:
+                body = resp.json()
+                if "errors" in body:
+                    err_msg = body["errors"][0].get("message", "") if body["errors"] else ""
+                    logger.warning("%s GraphQL error: %s", log_name, err_msg)
+                    # token 过期：尝试刷新
+                    if "ACCESS_TOKEN_INVALID" in str(body) or "过期" in err_msg:
+                        if token and attempt == 0:
+                            from .token_profile import find_user_by_access_token, refresh_token_for_user
+                            username, _ = find_user_by_access_token(token)
+                            if username:
+                                logger.info("检测到 token 过期，尝试刷新: %s", username)
+                                new_tokens = refresh_token_for_user(username)
+                                if new_tokens and new_tokens.get("access_token"):
+                                    token = new_tokens["access_token"]
+                                    logger.info("token 刷新成功，重试请求: %s", log_name)
+                                    continue  # 用新 token 重试
+                        return resp  # 无法刷新，返回原响应
+                return resp
+            logger.warning("%s failed status=%d, retrying (%d/%d)", log_name, resp.status_code, attempt + 1, max_retries)
+        except Exception as e:
+            logger.warning("%s exception=%s, retrying (%d/%d)", log_name, e, attempt + 1, max_retries)
+            if _is_ssl_error(e) and attempt >= 1:
+                break
+        if attempt < max_retries - 1:
+            time.sleep(0.3)
+    return None
 
 
-def _cache_profile_from_tokens(tokens: Dict[str, Any] | None):
-    if not tokens:
-        return
-    access_token = tokens.get("access_token")
-    if not access_token:
-        return
+# ============= 统一返回结构 =============
 
-    profile = (
-        _profile_from_claims(_decode_jwt_payload(tokens.get("id_token", "")))
-        or _profile_from_claims(_decode_jwt_payload(access_token))
-    )
-    if not profile:
-        return
+class APIResult:
+    """API 调用结果封装。"""
 
-    with _get_token_lock():
-        _TOKEN_PROFILE_CACHE[access_token] = {"profile": profile, "ts": time.time()}
+    @staticmethod
+    def success(data: Any = None) -> Dict[str, Any]:
+        """成功响应。"""
+        return {"ok": True, "data": data}
 
-
-def _get_profile_by_access_token(access_token: str) -> Dict[str, Any] | None:
-    now = time.time()
-    with _get_token_lock():
-        entry = _TOKEN_PROFILE_CACHE.get(access_token)
-        if entry and now - float(entry.get("ts", 0)) < float(TOKEN_PROFILE_TTL_SEC):
-            return entry.get("profile")
-    return _profile_from_claims(_decode_jwt_payload(access_token))
-
-
-def _build_user_info_from_profile(profile: Dict[str, Any] | None) -> Dict[str, Any] | None:
-    if not profile:
-        return None
-
-    user_code = profile.get("user_code", "")
-    display_name = profile.get("display_name", user_code)
-    dept_code = profile.get("dept_code", "")
-    dept_name = profile.get("dept_name", "")
-    dept_name_en = profile.get("dept_name_en", "")
-    email = profile.get("email", "")
-    phone = profile.get("phone", "")
-
-    participant_info = {
-        "participant_id": user_code,
-        "participant_name": display_name,
-        "participant_dept_id": dept_code,
-        "participant_dept_name": dept_name,
-        "mobile": phone,
-        "email": email,
-        "operate_user_id": user_code,
-        "operate_user_name": display_name,
-    }
-    return {
-        "created_user": user_code,
-        "created_user_name": display_name,
-        "appointment_user": user_code,
-        "appointment_user_name": display_name,
-        "dept_code": dept_code,
-        "dept_name": dept_name,
-        "dept_name_en": dept_name_en,
-        "email": email,
-        "phone": phone,
-        "participant_info": participant_info,
-    }
+    @staticmethod
+    def error(code: str, message: str) -> Dict[str, Any]:
+        """错误响应。"""
+        return {"ok": False, "code": code, "message": message}
 
 
 # ============= 用户信息获取 =============
 
-def get_user_info_from_appointment(token, id_token=""):
-    """尝试从已有预约记录中推断用户信息。"""
-    from .cas_login_requests import requests_post_with_retry
+def get_user_info_from_appointment(
+    token: str,
+    id_token: str = ""
+) -> Optional[Dict[str, Any]]:
+    """
+    尝试从已有预约记录中推断用户信息。
 
-    headers = {
-        "Authorization": f"Bearer {token}",
-        "Content-Type": "application/json",
-        "Origin": WF_ORIGIN,
-        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/137.0.0.0 Safari/537.36 Edg/137.0.0.0",
-    }
+    Args:
+        token: 访问令牌
+        id_token: ID 令牌（可选）
+
+    Returns:
+        用户信息字典，失败返回 None
+    """
+    from .http_utils import requests_post_with_retry
+
+    headers = build_headers(token)
 
     payload = {
         "operationName": "findAppointmentInformationAllForAccount",
@@ -254,14 +265,26 @@ def get_user_info_from_appointment(token, id_token=""):
         return None
 
 
-def resolve_user_info(token: str, id_token: str = "") -> Dict[str, Any] | None:
-    """先从 API 获取预约用户信息，失败再回退到 JWT claims。"""
+def resolve_user_info(
+    token: str,
+    id_token: str = ""
+) -> Optional[Dict[str, Any]]:
+    """
+    先从 API 获取预约用户信息，失败再回退到 JWT claims。
+
+    Args:
+        token: 访问令牌
+        id_token: ID 令牌（可选）
+
+    Returns:
+        用户信息字典，失败返回 None
+    """
     user_info = get_user_info_from_appointment(token, id_token=id_token)
     if user_info:
         return user_info
 
-    profile = _get_profile_by_access_token(token)
-    user_info = _build_user_info_from_profile(profile)
+    profile = get_profile_by_access_token(token)
+    user_info = build_user_info_from_profile(profile)
     if user_info:
         _debug("resolved user info from token profile fallback")
     return user_info
@@ -269,86 +292,80 @@ def resolve_user_info(token: str, id_token: str = "") -> Dict[str, Any] | None:
 
 # ============= 资源查询 API =============
 
-def _make_graphql_request(session, url, headers, payload, log_name=""):
-    """使用共享 Session 发送 GraphQL 请求，带重试。"""
-    max_retries = 2
-    timeout = 10
-    for attempt in range(max_retries):
-        try:
-            t0 = time.time()
-            resp = session.post(url, json=payload, headers=headers, timeout=timeout)
-            elapsed = (time.time() - t0) * 1000
-            if log_name and elapsed > 500:
-                logger.info("[性能] %s: %.0fms (attempt %d)", log_name, elapsed, attempt + 1)
-            if resp.status_code == 200:
-                body = resp.json()
-                if "errors" in body:
-                    err_msg = body["errors"][0].get("message", "") if body["errors"] else ""
-                    logger.warning("%s GraphQL error: %s", log_name, err_msg)
-                    # token 过期不重试
-                    if "ACCESS_TOKEN_INVALID" in str(body) or "过期" in err_msg:
-                        return resp
-                return resp
-            logger.warning("%s failed status=%d, retrying (%d/%d)", log_name, resp.status_code, attempt + 1, max_retries)
-        except Exception as e:
-            logger.warning("%s exception=%s, retrying (%d/%d)", log_name, e, attempt + 1, max_retries)
-            if _is_ssl_error(e) and attempt >= 1:
-                break
-        if attempt < max_retries - 1:
-            time.sleep(0.3)
-    return None
+def find_time_slots_by_resource(
+    token: str,
+    resources_id: str,
+    date_ms: int,
+    id_token: str = "",
+    session: Optional[requests.Session] = None
+) -> Optional[Dict[str, Any]]:
+    """
+    按日期时间戳查询资源时段及可预约数量。
 
+    Args:
+        token: 访问令牌
+        resources_id: 资源 ID
+        date_ms: 日期毫秒时间戳
+        id_token: ID 令牌（可选）
+        session: 可复用的 Session（可选）
 
-def _is_ssl_error(error: Exception) -> bool:
-    error_str = str(error).lower()
-    return 'ssl' in error_str or 'eof' in error_str or 'protocol' in error_str
-
-
-def _shared_session():
-    """创建带连接池的共享 Session，复用 TCP/TLS 连接。"""
-    s = requests.Session()
-    adapter = requests.adapters.HTTPAdapter(pool_connections=20, pool_maxsize=20)
-    s.mount('https://', adapter)
-    s.mount('http://', adapter)
-    return s
-
-
-def find_time_slots_by_resource(token, resources_id, date_ms, id_token="", session=None):
-    """按日期时间戳查询资源时段及可预约数量。"""
-    headers = {
-        "Authorization": f"Bearer {token}",
-        "Content-Type": "application/json",
-        "Origin": WF_ORIGIN,
-        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/137.0.0.0 Safari/537.36 Edg/137.0.0.0",
-    }
+    Returns:
+        时间槽数据字典，失败返回 None
+    """
+    headers = build_headers(token)
     payload = {
         "operationName": "findResourcesTimeSlotByResourcesIdAndDate",
         "variables": {
             "resourcesId": resources_id,
             "date": date_ms
         },
-        "query": """query findResourcesTimeSlotByResourcesIdAndDate($resourcesId: String!, $date: Date!) {\n  findResourcesTimeSlotByResourcesIdAndDate(resourcesId: $resourcesId, date: $date) {\n    id\n    resources_id\n    kssj\n    jssj\n    order\n    del\n    create_time\n    canAppointmentNumberDesc\n    canAppointmentNumberDesc_en\n    canAppointmentNumber\n  }\n}\n"""
+        "query": """query findResourcesTimeSlotByResourcesIdAndDate($resourcesId: String!, $date: Date!) {
+  findResourcesTimeSlotByResourcesIdAndDate(resourcesId: $resourcesId, date: $date) {
+    id
+    resources_id
+    kssj
+    jssj
+    order
+    del
+    create_time
+    canAppointmentNumberDesc
+    canAppointmentNumberDesc_en
+    canAppointmentNumber
+  }
+}"""
     }
     s = session or requests
-    resp = _make_graphql_request(s, _graphql_url(id_token), headers, payload, f"time_slots({resources_id[:8]})")
+    resp = _make_graphql_request(s, _graphql_url(id_token), headers, payload, f"time_slots({resources_id[:8]})", token=token)
     if not resp:
         return None
     return resp.json()
 
 
-def list_resources_by_account(token, bookdate, type_id=None, id_token="", account="", session=None):
+def list_resources_by_account(
+    token: str,
+    bookdate: str,
+    type_id: Optional[str] = None,
+    id_token: str = "",
+    account: str = "",
+    session: Optional[requests.Session] = None
+) -> Optional[List[Dict[str, Any]]]:
     """
     基于 findResourcesAllByAccount 获取指定日期的资源列表（包含时间段）。
-    返回 JSON 数据结构中的 resources 列表，失败返回 None。
+
+    Args:
+        token: 访问令牌
+        bookdate: 预约日期 (YYYY-MM-DD)
+        type_id: 资源类型 ID（可选，默认羽毛球）
+        id_token: ID 令牌（可选）
+        account: 账户（可选）
+        session: 可复用的 Session（可选）
+
+    Returns:
+        资源列表，失败返回 None
     """
     if type_id is None:
         type_id = BADMINTON_TYPE_ID
-    headers = {
-        "Authorization": f"Bearer {token}",
-        "Content-Type": "application/json",
-        "Origin": WF_ORIGIN,
-        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/137.0.0.0 Safari/537.36 Edg/137.0.0.0",
-    }
+    headers = build_headers(token)
     payload = {
         "operationName": "findResourcesAllByAccount",
         "variables": {
@@ -372,7 +389,7 @@ def list_resources_by_account(token, bookdate, type_id=None, id_token="", accoun
     }
     s = session or requests
     t0 = time.time()
-    resp = _make_graphql_request(s, _graphql_url(id_token), headers, payload, "list_resources")
+    resp = _make_graphql_request(s, _graphql_url(id_token), headers, payload, "list_resources", token=token)
     elapsed = (time.time() - t0) * 1000
     logger.info("[性能] list_resources_by_account: %.0fms", elapsed)
     if not resp:
@@ -383,83 +400,30 @@ def list_resources_by_account(token, bookdate, type_id=None, id_token="", accoun
     return data['data']['findResourcesAllByAccount']
 
 
-def check_resource_availability_on_date(token, resources_id, bookdate):
-    """
-    检查某个资源在指定日期的所有时间段是否可约。
-    返回列表: [{kssj, jssj, canAppointmentNumber}]
-    """
-    dt = datetime.strptime(bookdate, "%Y-%m-%d")
-    date_ms = int(dt.timestamp() * 1000)
-    detail = find_time_slots_by_resource(token, resources_id, date_ms)
-    if not detail or 'data' not in detail or 'findResourcesTimeSlotByResourcesIdAndDate' not in detail['data']:
-        return []
-    slots = detail['data']['findResourcesTimeSlotByResourcesIdAndDate']
-    results = []
-    for s in slots:
-        results.append({
-            'kssj': s.get('kssj'),
-            'jssj': s.get('jssj'),
-            'canAppointmentNumber': s.get('canAppointmentNumber')
-        })
-    return results
-
-
-def find_resources_id_by_name(token, bookdate, resources_name):
-    """按显示名称查找指定日期的资源 ID。"""
-    resources = list_resources_by_account(token, bookdate)
-    if not resources:
-        return None
-    for r in resources:
-        if r.get('resources_name') == resources_name:
-            return r.get('id')
-    return None
-
-
-def demo_check_availability(token, bookdate, resources_name=None):
-    """
-    测试程序：
-    - 若提供 resources_name：查询其资源 ID，并输出该资源当天所有时间段可预约数量
-    - 若不提供：输出当天所有资源及其每个时间段的可预约数量
-    """
-    if resources_name:
-        resources_id = find_resources_id_by_name(token, bookdate, resources_name)
-        if not resources_id:
-            logger.warning("resource not found: %s", resources_name)
-            return
-        results = check_resource_availability_on_date(token, resources_id, bookdate)
-        logger.info("resource %s (%s) on %s:", resources_name, resources_id, bookdate)
-        for row in results:
-            logger.info("  %s-%s: %s", row['kssj'], row['jssj'], row['canAppointmentNumber'])
-    else:
-        resources = list_resources_by_account(token, bookdate)
-        if not resources:
-            logger.warning("未获取到资源列表")
-            return
-        for r in resources:
-            rid = r.get('id')
-            rname = r.get('resources_name')
-            results = check_resource_availability_on_date(token, rid, bookdate)
-            logger.info("resource %s (%s) on %s:", rname, rid, bookdate)
-            for row in results:
-                logger.info("  %s-%s: %s", row['kssj'], row['jssj'], row['canAppointmentNumber'])
-
-
 # ============= 预约记录查询 =============
 
-def list_appointments_for_account(token, bookdate, id_token="", session=None):
+def list_appointments_for_account(
+    token: str,
+    bookdate: str,
+    id_token: str = "",
+    session: Optional[requests.Session] = None
+) -> List[Dict[str, Any]]:
     """
-    拉取当前账户在指定日期的预约记录，返回 edges 列表。
+    拉取当前账户在指定日期的预约记录。
+
+    Args:
+        token: 访问令牌
+        bookdate: 预约日期 (YYYY-MM-DD)
+        id_token: ID 令牌（可选）
+        session: 可复用的 Session（可选）
+
+    Returns:
+        预约记录 edges 列表，失败返回空列表 []
     """
     # 将 YYYY-MM-DD 转为当天 00:00:00 的毫秒时间戳以便对比
-    dt = datetime.strptime(bookdate, "%Y-%m-%d")
-    bookdate_ms = int(dt.timestamp() * 1000)
+    bookdate_ms = _bookdate_to_ms(bookdate)
 
-    headers = {
-        "Authorization": f"Bearer {token}",
-        "Content-Type": "application/json",
-        "Origin": WF_ORIGIN,
-        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/137.0.0.0 Safari/537.36 Edg/137.0.0.0",
-    }
+    headers = build_headers(token)
     payload = {
         "operationName": "findAppointmentInformationAllForAccount",
         "variables": {
@@ -470,65 +434,107 @@ def list_appointments_for_account(token, bookdate, id_token="", session=None):
                 "state": {"eq": 0}
             }
         },
-        "query": """query findAppointmentInformationAllForAccount($first: Int, $offset: Int, $after: String, $filter: AppointmentInformationFilterMap, $appointmentDate: [String], $only_flow: String, $updateAppointmentState: String) {\n  findAppointmentInformationAllForAccount(first: $first, offset: $offset, after: $after, filter: $filter, appointmentDate: $appointmentDate, only_flow: $only_flow, updateAppointmentState: $updateAppointmentState) {\n    edges {\n      node {\n        resources_id\n        resources_name\n        appointment_date\n        start_time\n        end_time\n        state\n      }\n      cursor\n    }\n    pageInfo { endCursor startCursor }\n    totalCount\n  }\n}\n"""
+        "query": """query findAppointmentInformationAllForAccount($first: Int, $offset: Int, $after: String, $filter: AppointmentInformationFilterMap, $appointmentDate: [String], $only_flow: String, $updateAppointmentState: String) {
+  findAppointmentInformationAllForAccount(first: $first, offset: $offset, after: $after, filter: $filter, appointmentDate: $appointmentDate, only_flow: $only_flow, updateAppointmentState: $updateAppointmentState) {
+    edges {
+      node {
+        resources_id
+        resources_name
+        appointment_date
+        start_time
+        end_time
+        state
+      }
+      cursor
+    }
+    pageInfo { endCursor startCursor }
+    totalCount
+  }
+}"""
     }
     s = session or requests
     t0 = time.time()
-    resp = _make_graphql_request(s, _graphql_url(id_token), headers, payload, "list_appointments")
+    resp = _make_graphql_request(s, _graphql_url(id_token), headers, payload, "list_appointments", token=token)
     logger.info("[性能] list_appointments_for_account: %.0fms", (time.time() - t0) * 1000)
     if not resp:
         return []
-    data = resp.json()
-    edges = data.get('data', {}).get('findAppointmentInformationAllForAccount', {}).get('edges', [])
-    # 过滤同一天的预约（appointment_date 为毫秒）
-    same_day = [e for e in edges if abs(int(e.get('node', {}).get('appointment_date', 0)) - bookdate_ms) < 24*60*60*1000]
-    return same_day
+    try:
+        data = resp.json()
+        edges = data.get('data', {}).get('findAppointmentInformationAllForAccount', {}).get('edges', [])
+        # 过滤同一天的预约（appointment_date 为毫秒）
+        same_day = [e for e in edges if abs(int(e.get('node', {}).get('appointment_date', 0)) - bookdate_ms) < 24*60*60*1000]
+        return same_day
+    except Exception as e:
+        logger.warning("list_appointments_for_account parse error: %s", e)
+        return []
 
 
-def compute_availability_for_date(token, bookdate, id_token=""):
-    """计算指定日期所有资源的可用性。使用共享 Session 复用连接，全并发请求。"""
+def compute_availability_for_date(
+    token: str,
+    bookdate: str,
+    id_token: str = ""
+) -> List[Dict[str, Any]]:
+    """
+    计算指定日期所有资源的可用性。使用共享 Session 复用连接，全并发请求。
+
+    Args:
+        token: 访问令牌
+        bookdate: 预约日期 (YYYY-MM-DD)
+        id_token: ID 令牌（可选）
+
+    Returns:
+        可用性列表
+    """
     t0 = time.time()
     session = _shared_session()
 
-    # 阶段 1：并发获取资源列表 + 预约记录
-    t1 = time.time()
-    with ThreadPoolExecutor(max_workers=2) as init_executor:
-        resources_future = init_executor.submit(
-            list_resources_by_account, token, bookdate, id_token=id_token, session=session
-        )
-        appointments_future = init_executor.submit(
-            list_appointments_for_account, token, bookdate, id_token=id_token, session=session
-        )
-        resources = resources_future.result()
-        my_edges = appointments_future.result()
-    t2 = time.time()
-    logger.info("[性能] 获取资源列表+预约记录: %.0fms", (t2 - t1) * 1000)
+    try:
+        # 阶段 1：并发获取资源列表 + 预约记录
+        t1 = time.time()
+        with ThreadPoolExecutor(max_workers=2) as init_executor:
+            resources_future = init_executor.submit(
+                list_resources_by_account, token, bookdate, id_token=id_token, session=session
+            )
+            appointments_future = init_executor.submit(
+                list_appointments_for_account, token, bookdate, id_token=id_token, session=session
+            )
+            resources = resources_future.result()
+            my_edges = appointments_future.result()
+        t2 = time.time()
+        logger.info("[性能] 获取资源列表+预约记录: %.0fms", (t2 - t1) * 1000)
 
-    my_map = _build_my_bookings_map(my_edges)
-    slots_data = _fetch_all_time_slots(token, bookdate, resources, id_token=id_token, session=session)
-    return _merge_bookings(slots_data, my_map, t0)
+        my_map = _build_my_bookings_map(my_edges)
+        slots_data = _fetch_all_time_slots(token, bookdate, resources or [], id_token=id_token, session=session)
+        return _merge_bookings(slots_data, my_map, t0)
+    finally:
+        session.close()
 
 
-def _build_my_bookings_map(my_edges):
+def _build_my_bookings_map(my_edges: List[Dict[str, Any]]) -> Dict[Tuple[str, str, str], bool]:
     """从预约记录构建 bookedByMe 映射。"""
-    my_map = {}
+    my_map: Dict[Tuple[str, str, str], bool] = {}
     for e in my_edges:
         n = e.get('node', {})
-        key = (n.get('resources_id'), n.get('start_time'), n.get('end_time'))
+        key = (n.get('resources_id', ''), n.get('start_time', ''), n.get('end_time', ''))
         my_map[key] = True
     return my_map
 
 
-def _fetch_all_time_slots(token, bookdate, resources, id_token="", session=None):
+def _fetch_all_time_slots(
+    token: str,
+    bookdate: str,
+    resources: List[Dict[str, Any]],
+    id_token: str = "",
+    session: Optional[requests.Session] = None
+) -> Dict[str, Tuple[str, Optional[Dict[str, Any]]]]:
     """获取所有场地的可用性数据（不含 bookedByMe）。返回 dict: rid -> (rname, slots_raw)。"""
     if not resources:
         return {}
 
-    dt = datetime.strptime(bookdate, "%Y-%m-%d")
-    date_ms = int(dt.timestamp() * 1000)
+    date_ms = _bookdate_to_ms(bookdate)
 
-    rid_list = [(r.get('id'), r.get('resources_name')) for r in resources]
-    results_map = {}
+    rid_list = [(r.get('id'), r.get('resources_name')) for r in resources if r.get('id')]
+    results_map: Dict[str, Tuple[str, Optional[Dict[str, Any]]]] = {}
     t3 = time.time()
     max_workers = max(1, min(15, len(rid_list)))
     with ThreadPoolExecutor(max_workers=max_workers) as executor:
@@ -541,19 +547,23 @@ def _fetch_all_time_slots(token, bookdate, resources, id_token="", session=None)
             detail = None
             try:
                 detail = fut.result()
-            except Exception:
-                detail = None
+            except Exception as e:
+                logger.warning("fetch time slots failed, resource_id=%s, error=%s", rid, e)
             results_map[rid] = (rname, detail)
     t4 = time.time()
     logger.info("[性能] 获取%d个场地时间槽: %.0fms", len(rid_list), (t4 - t3) * 1000)
     return results_map
 
 
-def _merge_bookings(slots_data, my_map, t0=None):
+def _merge_bookings(
+    slots_data: Dict[str, Tuple[str, Optional[Dict[str, Any]]]],
+    my_map: Dict[Tuple[str, str, str], bool],
+    t0: Optional[float] = None
+) -> List[Dict[str, Any]]:
     """合并可用性数据和 bookedByMe。"""
-    out = []
+    out: List[Dict[str, Any]] = []
     for rid, (rname, detail) in slots_data.items():
-        slots = []
+        slots: List[Dict[str, Any]] = []
         if detail and 'data' in detail:
             for s in detail['data'].get('findResourcesTimeSlotByResourcesIdAndDate', []):
                 kssj = s.get('kssj')
@@ -574,17 +584,33 @@ def _merge_bookings(slots_data, my_map, t0=None):
 
 # ============= 预约前置校验 =============
 
+def check_resource_time_slot_capacity(
+    token: str,
+    resource_id: str,
+    time_slot_id_list: List[str],
+    book_date: str,
+    book_start_time: str,
+    book_end_time: str,
+    id_token: str = ""
+) -> Optional[Dict[str, Any]]:
+    """
+    检查时段容量是否可约。
 
-def check_resource_time_slot_capacity(token, resource_id, time_slot_id_list, book_date, book_start_time, book_end_time, id_token=""):
-    """检查时段容量是否可约。返回结果 dict 或 None。"""
-    from .cas_login_requests import requests_post_with_retry
+    Args:
+        token: 访问令牌
+        resource_id: 资源 ID
+        time_slot_id_list: 时间槽 ID 列表
+        book_date: 预约日期
+        book_start_time: 开始时间
+        book_end_time: 结束时间
+        id_token: ID 令牌（可选）
 
-    headers = {
-        "Authorization": f"Bearer {token}",
-        "Content-Type": "application/json",
-        "Origin": WF_ORIGIN,
-        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/137.0.0.0 Safari/537.36 Edg/137.0.0.0",
-    }
+    Returns:
+        检查结果字典，失败返回 None
+    """
+    from .http_utils import requests_post_with_retry
+
+    headers = build_headers(token)
     payload = {
         "operationName": "checkResourceTimeSlotCapacity",
         "variables": {
@@ -608,20 +634,29 @@ def check_resource_time_slot_capacity(token, resource_id, time_slot_id_list, boo
         data = resp.json()
         return data.get("data", {}).get("checkResourceTimeSlotCapacity")
     except Exception as e:
-        logger.warning("checkResourceTimeSlotCapacity error: %s", e)
+        logger.warning("check_resource_time_slot_capacity error: %s", e)
         return None
 
 
-def find_resource_detail(token, resource_id, id_token=""):
-    """获取资源详情，含 open_captcha_verify / capacity 等字段。返回 dict 或 None。"""
-    from .cas_login_requests import requests_post_with_retry
+def find_resource_detail(
+    token: str,
+    resource_id: str,
+    id_token: str = ""
+) -> Optional[Dict[str, Any]]:
+    """
+    获取资源详情，含 open_captcha_verify / capacity 等字段。
 
-    headers = {
-        "Authorization": f"Bearer {token}",
-        "Content-Type": "application/json",
-        "Origin": WF_ORIGIN,
-        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/137.0.0.0 Safari/537.36 Edg/137.0.0.0",
-    }
+    Args:
+        token: 访问令牌
+        resource_id: 资源 ID
+        id_token: ID 令牌（可选）
+
+    Returns:
+        资源详情字典，失败返回 None
+    """
+    from .http_utils import requests_post_with_retry
+
+    headers = build_headers(token)
     payload = {
         "operationName": "findResources",
         "variables": {
@@ -642,16 +677,31 @@ def find_resource_detail(token, resource_id, id_token=""):
 
 # ============= 预约 API =============
 
-def fetch_resource_time_id(token, bookdate, resources_name, kssj, jssj, id_token=""):
-    """获取资源和时间段 ID。"""
-    from .cas_login_requests import requests_post_with_retry
+def fetch_resource_time_id(
+    token: str,
+    bookdate: str,
+    resources_name: str,
+    kssj: str,
+    jssj: str,
+    id_token: str = ""
+) -> Optional[Tuple[str, str]]:
+    """
+    获取资源和时间段 ID。
 
-    headers = {
-        "Authorization": f"Bearer {token}",
-        "Content-Type": "application/json",
-        "Origin": WF_ORIGIN,
-        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/137.0.0.0 Safari/537.36 Edg/137.0.0.0",
-    }
+    Args:
+        token: 访问令牌
+        bookdate: 预约日期 (YYYY-MM-DD)
+        resources_name: 资源名称
+        kssj: 开始时间 (HH:MM)
+        jssj: 结束时间 (HH:MM)
+        id_token: ID 令牌（可选）
+
+    Returns:
+        (resource_id, time_id) 元组，失败返回 None
+    """
+    from .http_utils import requests_post_with_retry
+
+    headers = build_headers(token)
     payload = {
         "operationName": "findResourcesAllByAccount",
         "variables": {
@@ -675,12 +725,17 @@ def fetch_resource_time_id(token, bookdate, resources_name, kssj, jssj, id_token
     }
     response = requests_post_with_retry(_graphql_url(id_token), json=payload, headers=headers)
     if response is None or response.status_code != 200:
-        logger.warning("request failed, status=%d", response.status_code if response else 'None')
+        logger.warning("fetch_resource_time_id request failed, status=%d", response.status_code if response else 'None')
         return None
 
-    json_data = response.json()
+    try:
+        json_data = response.json()
+    except Exception as e:
+        logger.warning("fetch_resource_time_id parse error: %s", e)
+        return None
+
     if 'data' not in json_data or 'findResourcesAllByAccount' not in json_data['data']:
-        logger.warning("返回数据格式异常或无资源数据")
+        logger.warning("fetch_resource_time_id: 返回数据格式异常或无资源数据")
         return None
 
     resources = json_data['data']['findResourcesAllByAccount']
@@ -695,11 +750,33 @@ def fetch_resource_time_id(token, bookdate, resources_name, kssj, jssj, id_token
     return None
 
 
-def make_appointment(token, time_id, resource_id, bookdata, kssj, jssj, id_token=""):
-    """执行预约。"""
-    from .cas_login_requests import requests_post_with_retry
+def make_appointment(
+    token: str,
+    time_id: str,
+    resource_id: str,
+    bookdate: str,
+    kssj: str,
+    jssj: str,
+    id_token: str = ""
+) -> Dict[str, Any]:
+    """
+    执行预约。
 
-    _debug(f"appointment args date={bookdata}, start={kssj}, end={jssj}, resource_id={resource_id}, time_id={time_id}")
+    Args:
+        token: 访问令牌
+        time_id: 时间槽 ID
+        resource_id: 资源 ID
+        bookdate: 预约日期 (YYYY-MM-DD)
+        kssj: 开始时间 (HH:MM)
+        jssj: 结束时间 (HH:MM)
+        id_token: ID 令牌（可选）
+
+    Returns:
+        预约结果字典，包含 code 和 messages 字段
+    """
+    from .http_utils import requests_post_with_retry
+
+    _debug(f"appointment args date={bookdate}, start={kssj}, end={jssj}")
 
     user_info = resolve_user_info(token, id_token=id_token)
     if not user_info:
@@ -728,12 +805,7 @@ def make_appointment(token, time_id, resource_id, bookdata, kssj, jssj, id_token
     participant.setdefault("mobile", phone)
     participant.setdefault("email", email)
 
-    headers = {
-        "Authorization": f"Bearer {token}",
-        "Content-Type": "application/json",
-        "Origin": WF_ORIGIN,
-        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/137.0.0.0 Safari/537.36 Edg/137.0.0.0",
-    }
+    headers = build_headers(token)
     payload = {
         "operationName": "saveAppointmentInformationAll",
         "variables": {
@@ -777,7 +849,7 @@ def make_appointment(token, time_id, resource_id, bookdata, kssj, jssj, id_token
                 ],
                 "appointmentCollectionList": [],
                 "need_meeting_signin": 0,
-                "appointment_date": bookdata,
+                "appointment_date": bookdate,
                 "start_time": kssj,
                 "end_time": jssj,
             },
@@ -804,8 +876,7 @@ def make_appointment(token, time_id, resource_id, bookdata, kssj, jssj, id_token
     try:
         resp_json = response.json()
     except Exception:
-        return {"code": "INVALID_RESPONSE", "messages": [response.text[:200]]}
+        return {"code": "INVALID_RESPONSE", "messages": [response.text[:200] if response.text else "Empty response"]}
 
     _debug(f"saveAppointmentInformationAll status={response.status_code}")
-    _debug(f"saveAppointmentInformationAll response={resp_json}")
     return resp_json

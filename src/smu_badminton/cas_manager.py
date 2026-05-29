@@ -1,21 +1,25 @@
 import typing as t
+import threading
+from typing import Any, Dict, List, Optional
+from enum import Enum
+import time
+import uuid
+import logging
 
-from .cas_login_requests import (
-    login_with_retry,
-    get_token_cached,
+# 从各模块导入
+from .cas_login import login_with_retry
+from .token_profile import get_cached_token, cache_token_for_user
+from .booking_api import (
     fetch_resource_time_id,
     make_appointment,
-    get_network_time,
-    get_target_datetime_from_network,
     list_appointments_for_account,
     check_resource_time_slot_capacity,
     find_resource_detail,
 )
-import threading
-from typing import Any, Dict, Tuple, List
-import time
-import uuid
-import logging
+from .http_utils import (
+    get_network_time,
+    get_target_datetime_from_network,
+)
 
 # 导入核心工具模块
 from .core_utils import (
@@ -23,9 +27,7 @@ from .core_utils import (
     DatabaseError,
     handle_errors,
     db_operation,
-    retry_on_error,
     BookingError,
-    JobNotFoundError,
     success_response,
     obfuscate_password,
     deobfuscate_password,
@@ -33,6 +35,84 @@ from .core_utils import (
 
 # 配置日志
 logger = logging.getLogger(__name__)
+
+
+# ============= Token 获取（缓存或登录）=============
+
+def get_token_cached(
+    login_url: str,
+    captcha_url: str,
+    username: str,
+    password: str,
+    ttl_seconds: int = 900
+) -> Optional[Dict[str, str]]:
+    """
+    获取缓存的 token 或重新登录。
+
+    Args:
+        login_url: CAS 登录 URL
+        captcha_url: 验证码 URL
+        username: 用户名
+        password: 密码
+        ttl_seconds: 缓存 TTL 秒数
+
+    Returns:
+        token 字典（包含 access_token 和 id_token），失败返回 None
+    """
+    t0 = time.time()
+
+    tokens_cached = get_cached_token(username, ttl_seconds)
+    if tokens_cached:
+        logger.info("[性能] Token 缓存命中: %.0fms", (time.time() - t0) * 1000)
+        return tokens_cached
+
+    logger.info("[性能] Token 缓存未命中，开始登录...")
+    t1 = time.time()
+    tokens = login_with_retry(login_url, captcha_url, username, password, max_retries=3)
+    t2 = time.time()
+    logger.info("[性能] CAS 登录耗时: %.0fms", (t2 - t1) * 1000)
+
+    if not tokens or not tokens.get("access_token"):
+        return None
+
+    cache_token_for_user(username, tokens)
+    logger.info("[性能] get_token_cached 总耗时: %.0fms", (time.time() - t0) * 1000)
+    return tokens
+
+
+# ============= 任务状态机 =============
+
+class JobState(str, Enum):
+    """任务状态枚举。
+
+    状态转换规则：
+    - scheduled -> waiting -> running -> done
+    - scheduled -> waiting -> cancelled
+    - running -> failed
+    - running -> skipped
+    """
+    SCHEDULED = "scheduled"   # 已创建，等待到达预登录窗口
+    WAITING = "waiting"       # 已到达预登录窗口，正在登录/预取
+    RUNNING = "running"       # 已到达目标时间，正在执行预约
+    DONE = "done"             # 预约成功（终态）
+    FAILED = "failed"         # 预约失败（终态）
+    SKIPPED = "skipped"       # 已有预约，跳过（终态）
+    CANCELLED = "cancelled"   # 已取消（终态）
+
+
+# 终态集合（不可被覆盖）
+TERMINAL_STATES = {JobState.DONE, JobState.FAILED, JobState.SKIPPED, JobState.CANCELLED}
+
+# 允许的状态转换
+VALID_TRANSITIONS: Dict[JobState, set] = {
+    JobState.SCHEDULED: {JobState.WAITING, JobState.CANCELLED},
+    JobState.WAITING: {JobState.RUNNING, JobState.FAILED, JobState.SKIPPED, JobState.CANCELLED},
+    JobState.RUNNING: {JobState.DONE, JobState.FAILED, JobState.SKIPPED},
+    JobState.DONE: set(),
+    JobState.FAILED: set(),
+    JobState.SKIPPED: set(),
+    JobState.CANCELLED: set(),
+}
 
 
 class BookingJob:
@@ -82,20 +162,20 @@ class BookingManager:
     def stop_job(self, job_id: str, delete_local_booking: bool = True) -> bool:
         """
         停止任务
-        
+
         Args:
             job_id: 任务ID
             delete_local_booking: 是否删除本地预约记录（默认True）
-        
+
         Returns:
             是否成功停止任务
         """
         with self._lock:
             job = self._jobs.get(job_id)
-        
-        # 先从DB取参数，以便后续清理本地预约记录，并用于判断任务是否存在
+
+        # 先从DB取参数
         job_row = self._get_job_row(job_id)
-        
+
         if job:
             job.cancel_event.set()
             # 使用较短的超时避免阻塞API响应
@@ -103,10 +183,10 @@ class BookingManager:
             # 从内存移除
             with self._lock:
                 self._jobs.pop(job_id, None)
-        
-        # 标记取消（使用装饰器处理异常）
-        self._update_job_row_status(job_id, "cancelled")
-        
+
+        # 安全标记取消（检查状态机）
+        self._safe_update_status(job_id, JobState.CANCELLED)
+
         # 清除本地预约记录
         if delete_local_booking and job_row:
             self._delete_local_booking(
@@ -116,7 +196,7 @@ class BookingManager:
                 jssj=job_row.get("jssj", ""),
                 resources_name=job_row.get("resources_name", ""),
             )
-        
+
         logger.info(f"任务已停止: {job_id}")
         return bool(job) or bool(job_row)
 
@@ -139,8 +219,59 @@ class BookingManager:
         logger.debug(f"任务已持久化: {job_id}")
 
     @db_operation
+    def _get_current_status(self, job_id: str) -> str | None:
+        """获取任务当前状态。"""
+        with self._db_pool.get_connection(auto_commit=False) as conn:
+            cur = conn.execute("SELECT status FROM scheduled_jobs WHERE job_id=?", (job_id,))
+            row = cur.fetchone()
+            return row[0] if row else None
+
+    def _safe_update_status(self, job_id: str, new_status: JobState) -> bool:
+        """
+        安全更新任务状态，遵守状态机规则。
+
+        Args:
+            job_id: 任务ID
+            new_status: 新状态
+
+        Returns:
+            是否成功更新（False 表示终态不可更改或无效转换）
+        """
+        try:
+            current = self._get_current_status(job_id)
+            if not current:
+                logger.warning(f"任务不存在: {job_id}")
+                return False
+
+            # 解析当前状态
+            try:
+                current_state = JobState(current)
+            except ValueError:
+                logger.warning(f"任务状态异常: {job_id} -> {current}")
+                return False
+
+            # 检查是否为终态
+            if current_state in TERMINAL_STATES:
+                logger.debug(f"任务已处于终态，不可更改: {job_id} -> {current_state.value}")
+                return False
+
+            # 检查状态转换是否合法
+            if new_status not in VALID_TRANSITIONS.get(current_state, set()):
+                logger.warning(f"非法状态转换: {job_id} {current_state.value} -> {new_status.value}")
+                return False
+
+            # 执行更新
+            with self._db_pool.get_connection() as conn:
+                conn.execute("UPDATE scheduled_jobs SET status=? WHERE job_id=?", (new_status.value, job_id))
+            logger.debug(f"任务状态已更新: {job_id} {current_state.value} -> {new_status.value}")
+            return True
+        except Exception as e:
+            logger.error(f"更新任务状态失败: {job_id}, {e}")
+            return False
+
+    @db_operation
     def _update_job_row_status(self, job_id: str, status: str):
-        """更新任务状态"""
+        """更新任务状态（兼容旧接口，建议使用 _safe_update_status）。"""
         with self._db_pool.get_connection() as conn:
             conn.execute("UPDATE scheduled_jobs SET status=? WHERE job_id=?", (status, job_id))
         logger.debug(f"任务状态已更新: {job_id} -> {status}")
@@ -172,6 +303,11 @@ class BookingManager:
                 "resources_name": row[5],
             }
 
+    def get_job_owner(self, job_id: str) -> str | None:
+        """获取任务的所有者用户名。"""
+        row = self._get_job_row(job_id)
+        return row.get("username") if row else None
+
     @db_operation
     def _delete_local_booking(self, *, username: str, bookdate: str, kssj: str, jssj: str, resources_name: str):
         """删除本地预约记录"""
@@ -182,9 +318,9 @@ class BookingManager:
             )
         logger.debug(f"本地预约记录已删除: {username} - {bookdate} {kssj}-{jssj}")
 
-    def _cleanup_job(self, job_id: str, status: str, *, username: str, bookdate: str, kssj: str, jssj: str, resources_name: str):
+    def _cleanup_job(self, job_id: str, status: JobState, *, username: str, bookdate: str, kssj: str, jssj: str, resources_name: str):
         """
-        统一的任务清理方法
+        统一的任务清理方法。
 
         Args:
             job_id: 任务ID
@@ -192,7 +328,7 @@ class BookingManager:
             username, bookdate, kssj, jssj, resources_name: 用于删除本地预约记录
         """
         try:
-            self._update_job_row_status(job_id, status)
+            self._safe_update_status(job_id, status)
             self._delete_local_booking(
                 username=username,
                 bookdate=bookdate,
@@ -200,6 +336,9 @@ class BookingManager:
                 jssj=jssj,
                 resources_name=resources_name
             )
+            # 从内存移除
+            with self._lock:
+                self._jobs.pop(job_id, None)
         except Exception as e:
             logger.warning(f"清理任务失败: {job_id}, {e}")
 
@@ -388,43 +527,48 @@ class BookingManager:
         }
 
         def run():
-            if cancel_event.is_set():
-                self._update_job_row_status(job_id, "cancelled")
-                return
-            tokens = get_token_cached(login_url, captcha_url, username, password, ttl_seconds=900)
-            if not tokens or not tokens.get("access_token"):
-                self._update_job_row_status(job_id, "failed")
-                return
-            if cancel_event.is_set():
-                self._update_job_row_status(job_id, "cancelled")
-                return
-            access_token = tokens["access_token"]
-            id_token = tokens.get("id_token", "")
-            # 限制：同一用户同一天只能预约一次
             try:
-                if list_appointments_for_account(access_token, bookdate, id_token=id_token):
-                    self._update_job_row_status(job_id, "skipped")
+                if cancel_event.is_set():
+                    self._safe_update_status(job_id, JobState.CANCELLED)
                     return
-            except Exception:
-                pass
-            result = fetch_resource_time_id(access_token, bookdate, resources_name, kssj, jssj, id_token=id_token)
-            if not result:
-                self._update_job_row_status(job_id, "failed")
-                return
-            resource_id, time_id = result
-            if cancel_event.is_set():
-                self._update_job_row_status(job_id, "cancelled")
-                return
-            resp = make_appointment(access_token, time_id, resource_id, bookdate, kssj, jssj, id_token=id_token)
-            # 根据预约结果更新状态
-            if resp and isinstance(resp, dict):
-                code = resp.get("code", "")
-                if code == "success" or code == "0":
-                    self._update_job_row_status(job_id, "done")
+                tokens = get_token_cached(login_url, captcha_url, username, password, ttl_seconds=900)
+                if not tokens or not tokens.get("access_token"):
+                    self._safe_update_status(job_id, JobState.FAILED)
+                    return
+                if cancel_event.is_set():
+                    self._safe_update_status(job_id, JobState.CANCELLED)
+                    return
+                access_token = tokens["access_token"]
+                id_token = tokens.get("id_token", "")
+                # 限制：同一用户同一天只能预约一次
+                try:
+                    if list_appointments_for_account(access_token, bookdate, id_token=id_token):
+                        self._safe_update_status(job_id, JobState.SKIPPED)
+                        return
+                except Exception:
+                    pass
+                result = fetch_resource_time_id(access_token, bookdate, resources_name, kssj, jssj, id_token=id_token)
+                if not result:
+                    self._safe_update_status(job_id, JobState.FAILED)
+                    return
+                resource_id, time_id = result
+                if cancel_event.is_set():
+                    self._safe_update_status(job_id, JobState.CANCELLED)
+                    return
+                resp = make_appointment(access_token, time_id, resource_id, bookdate, kssj, jssj, id_token=id_token)
+                # 根据预约结果更新状态
+                if resp and isinstance(resp, dict):
+                    code = resp.get("code", "")
+                    if code == "success" or code == "0":
+                        self._safe_update_status(job_id, JobState.DONE)
+                    else:
+                        self._safe_update_status(job_id, JobState.FAILED)
                 else:
-                    self._update_job_row_status(job_id, "failed")
-            else:
-                self._update_job_row_status(job_id, "failed")
+                    self._safe_update_status(job_id, JobState.FAILED)
+            finally:
+                # 任务完成后从内存移除
+                with self._lock:
+                    self._jobs.pop(job_id, None)
 
         th = threading.Thread(target=run, daemon=True)
         job_id = self._register(th, cancel_event, meta)
@@ -463,6 +607,9 @@ class BookingManager:
         num_threads: int = 5,
         resume_job_id: str | None = None,
     ) -> str:
+        # 校验并限制线程数（业务层 clamp）
+        num_threads = max(1, min(5, num_threads))
+
         # 去重：恢复场景不进行去重检查，直接使用原 job_id 恢复
         if resume_job_id is None:
             # 1) 先查DB（包含跨进程持久化）
@@ -521,20 +668,20 @@ class BookingManager:
                 else:
                     time.sleep(1)
             if cancel_event.is_set():
-                self._cleanup_job(job_id, "cancelled", username=username, bookdate=bookdate, kssj=kssj, jssj=jssj, resources_name=resources_name)
+                self._cleanup_job(job_id, JobState.CANCELLED, username=username, bookdate=bookdate, kssj=kssj, jssj=jssj, resources_name=resources_name)
                 return
 
             # 登录
             tokens = get_token_cached(login_url, captcha_url, username, password, ttl_seconds=900)
             if not tokens or not tokens.get("access_token"):
-                self._cleanup_job(job_id, "failed", username=username, bookdate=bookdate, kssj=kssj, jssj=jssj, resources_name=resources_name)
+                self._cleanup_job(job_id, JobState.FAILED, username=username, bookdate=bookdate, kssj=kssj, jssj=jssj, resources_name=resources_name)
                 return
             access_token = tokens["access_token"]
 
             # 限制：同一用户同一天只能预约一次
             try:
                 if list_appointments_for_account(access_token, bookdate, id_token=tokens.get("id_token", "")):
-                    self._cleanup_job(job_id, "skipped", username=username, bookdate=bookdate, kssj=kssj, jssj=jssj, resources_name=resources_name)
+                    self._cleanup_job(job_id, JobState.SKIPPED, username=username, bookdate=bookdate, kssj=kssj, jssj=jssj, resources_name=resources_name)
                     return
             except Exception:
                 pass
@@ -542,7 +689,7 @@ class BookingManager:
             # 预取资源/时间段
             result = fetch_resource_time_id(access_token, bookdate, resources_name, kssj, jssj, id_token=tokens.get("id_token", ""))
             if not result:
-                self._cleanup_job(job_id, "failed", username=username, bookdate=bookdate, kssj=kssj, jssj=jssj, resources_name=resources_name)
+                self._cleanup_job(job_id, JobState.FAILED, username=username, bookdate=bookdate, kssj=kssj, jssj=jssj, resources_name=resources_name)
                 return
             resource_id, time_id = result
 
@@ -568,22 +715,44 @@ class BookingManager:
                     else:
                         time.sleep(1)
                 if cancel_event.is_set():
-                    self._cleanup_job(job_id, "cancelled", username=username, bookdate=bookdate, kssj=kssj, jssj=jssj, resources_name=resources_name)
+                    # 只有第一个 worker 执行清理
+                    if tid == 1:
+                        self._cleanup_job(job_id, JobState.CANCELLED, username=username, bookdate=bookdate, kssj=kssj, jssj=jssj, resources_name=resources_name)
                     return
-                barrier.wait()
-                resp = make_appointment(access_token, time_id, resource_id, bookdate, kssj, jssj)
-                with results_lock:
-                    results.append({"thread": tid, "response": resp})
+
+                # 添加 barrier 超时
                 try:
-                    self._update_job_row_status(job_id, "done")
-                except Exception:
-                    pass
+                    barrier.wait(timeout=30.0)
+                except threading.BrokenBarrierError:
+                    logger.warning(f"Worker {tid} barrier 超时，任务可能已失败")
+                    with results_lock:
+                        results.append({"thread": tid, "response": None, "success": False, "error": "barrier_timeout"})
+                    if tid == 1:
+                        self._cleanup_job(job_id, JobState.FAILED, username=username, bookdate=bookdate, kssj=kssj, jssj=jssj, resources_name=resources_name)
+                    return
+
+                resp = make_appointment(access_token, time_id, resource_id, bookdate, kssj, jssj, id_token=tokens.get("id_token", ""))
+                success = resp and isinstance(resp, dict) and resp.get("code") in ("success", "0")
+                with results_lock:
+                    results.append({"thread": tid, "response": resp, "success": success})
+                # 不再在 worker 中更新状态，由主线程统一判断
 
             threads = [threading.Thread(target=worker, args=(i + 1,)) for i in range(num_threads)]
             for t in threads:
                 t.start()
             for t in threads:
                 t.join()
+
+            # 所有 worker 完成后，统一判断状态
+            success_count = sum(1 for r in results if r.get("success"))
+            if success_count > 0:
+                self._safe_update_status(job_id, JobState.DONE)
+            else:
+                self._safe_update_status(job_id, JobState.FAILED)
+
+            # 清理内存
+            with self._lock:
+                self._jobs.pop(job_id, None)
 
         th = threading.Thread(target=run, daemon=True)
         meta = {

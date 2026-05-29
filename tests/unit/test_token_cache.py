@@ -1,5 +1,5 @@
 """Token 缓存单元测试。"""
-from smu_badminton.cas_login_requests import clear_token_cache
+from smu_badminton.token_profile import clear_token_cache
 
 
 def test_clear_token_cache_single():
@@ -14,9 +14,9 @@ def test_clear_token_cache_all():
     clear_token_cache()
 
 
-def test_get_token_cached_miss():
+def test_get_cached_token_miss():
     """测试 token 缓存未命中。"""
-    from smu_badminton.cas_login_requests import get_token_cached
-    # 无效凭证应该返回 None
-    result = get_token_cached("fake_url", "fake_url", "nonexistent_user", "wrong_password", ttl_seconds=900)
+    from smu_badminton.token_profile import get_cached_token
+    # 无缓存用户应该返回 None
+    result = get_cached_token("nonexistent_user")
     assert result is None

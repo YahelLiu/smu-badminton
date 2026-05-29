@@ -24,7 +24,11 @@ def test_obfuscate_special_chars():
 
 
 def test_deobfuscate_invalid():
-    """测试无效输入返回原文。"""
-    # 不是有效的 base64 字符串应该返回原文
+    """测试无效输入返回空字符串。"""
+    # 不是有效的 base64 字符串应该返回空字符串（安全考虑）
     result = deobfuscate_password("not_valid_base64!!!")
-    assert result == "not_valid_base64!!!"
+    assert result == ""
+
+    # 随机字符串也应该返回空字符串
+    result = deobfuscate_password("random_string")
+    assert result == ""
