@@ -44,6 +44,30 @@ async def api_book(req: BookRequest) -> BookResponse:
     if lock.locked():
         return BookResponse(ok=False, error="resource_locked_processing")
 
+    # 检查：同一用户同一天只能预约一个任务
+    try:
+        db_jobs = booking_manager.list_scheduled_jobs(username=req.username)
+        for j in db_jobs:
+            if (
+                j.get("bookdate") == req.bookdate
+                and j.get("status") in ("scheduled", "running")
+            ):
+                return BookResponse(ok=False, error="您当天已有预约任务，每人每天只能预约一次")
+    except Exception:
+        pass
+
+    # 检查本地预约记录是否已存在（同一用户同一天）
+    try:
+        with get_db_pool().get_connection(auto_commit=False) as conn:
+            cur = conn.execute(
+                "SELECT 1 FROM local_bookings WHERE username=? AND bookdate=? LIMIT 1",
+                (req.username, req.bookdate),
+            )
+            if cur.fetchone():
+                return BookResponse(ok=False, error="您当天已有预约记录，每人每天只能预约一次")
+    except Exception as e:
+        logger.error(f"查询本地预约记录失败: {e}")
+
     async with lock:
         try:
             with get_db_pool().get_connection() as conn:
@@ -87,20 +111,29 @@ async def api_book_schedule(req: ScheduleRequest, background_tasks: BackgroundTa
     if lock.locked():
         return ScheduleResponse(ok=False, error="resource_locked_processing")
 
-    # 去重检查
+    # 去重检查：同一用户同一天只能预约一个任务
     try:
         db_jobs = booking_manager.list_scheduled_jobs(username=req.username)
         for j in db_jobs:
             if (
                 j.get("bookdate") == req.bookdate
-                and j.get("kssj") == req.kssj
-                and j.get("jssj") == req.jssj
-                and j.get("resources_name") == req.resources_name
-                and j.get("status") in ("scheduled", "waiting", "running")
+                and j.get("status") in ("scheduled", "running")
             ):
-                return ScheduleResponse(ok=True, data={"scheduled": True, "job_id": j.get("job_id"), "duplicate": True})
+                return ScheduleResponse(ok=False, error="您当天已有预约任务，每人每天只能预约一次")
     except Exception:
         pass
+
+    # 检查本地预约记录是否已存在（同一用户同一天）
+    try:
+        with get_db_pool().get_connection(auto_commit=False) as conn:
+            cur = conn.execute(
+                "SELECT 1 FROM local_bookings WHERE username=? AND bookdate=? LIMIT 1",
+                (req.username, req.bookdate),
+            )
+            if cur.fetchone():
+                return ScheduleResponse(ok=False, error="您当天已有预约记录，每人每天只能预约一次")
+    except Exception as e:
+        logger.error(f"查询本地预约记录失败: {e}")
 
     try:
         with get_db_pool().get_connection() as conn:

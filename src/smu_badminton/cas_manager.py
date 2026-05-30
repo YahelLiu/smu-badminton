@@ -86,13 +86,12 @@ class JobState(str, Enum):
     """任务状态枚举。
 
     状态转换规则：
-    - scheduled -> waiting -> running -> done
-    - scheduled -> waiting -> cancelled
+    - scheduled -> running -> done
+    - scheduled -> cancelled
     - running -> failed
     - running -> skipped
     """
-    SCHEDULED = "scheduled"   # 已创建，等待到达预登录窗口
-    WAITING = "waiting"       # 已到达预登录窗口，正在登录/预取
+    SCHEDULED = "scheduled"   # 已创建，等待执行（包括休眠和预登录阶段）
     RUNNING = "running"       # 已到达目标时间，正在执行预约
     DONE = "done"             # 预约成功（终态）
     FAILED = "failed"         # 预约失败（终态）
@@ -105,8 +104,7 @@ TERMINAL_STATES = {JobState.DONE, JobState.FAILED, JobState.SKIPPED, JobState.CA
 
 # 允许的状态转换
 VALID_TRANSITIONS: Dict[JobState, set] = {
-    JobState.SCHEDULED: {JobState.WAITING, JobState.CANCELLED},
-    JobState.WAITING: {JobState.RUNNING, JobState.FAILED, JobState.SKIPPED, JobState.CANCELLED},
+    JobState.SCHEDULED: {JobState.RUNNING, JobState.CANCELLED, JobState.FAILED, JobState.SKIPPED},
     JobState.RUNNING: {JobState.DONE, JobState.FAILED, JobState.SKIPPED},
     JobState.DONE: set(),
     JobState.FAILED: set(),
@@ -347,7 +345,7 @@ class BookingManager:
         """根据参数将仍在等待/运行中的任务标记为 cancelled"""
         with self._db_pool.get_connection() as conn:
             cur = conn.execute(
-                "UPDATE scheduled_jobs SET status='cancelled' WHERE username=? AND bookdate=? AND kssj=? AND jssj=? AND resources_name=? AND status IN ('scheduled','waiting','running')",
+                "UPDATE scheduled_jobs SET status='cancelled' WHERE username=? AND bookdate=? AND kssj=? AND jssj=? AND resources_name=? AND status IN ('scheduled','running')",
                 (username, bookdate, kssj, jssj, resources_name),
             )
             affected = cur.rowcount if cur.rowcount is not None else 0
@@ -440,7 +438,7 @@ class BookingManager:
         """从数据库恢复待处理的定时任务（服务重启后调用）"""
         with self._db_pool.get_connection(auto_commit=False) as conn:
             cur = conn.execute(
-                "SELECT job_id, login_url, captcha_url, username, password, bookdate, kssj, jssj, resources_name, target_time_str, num_threads, status FROM scheduled_jobs WHERE status IN ('scheduled','waiting','running')"
+                "SELECT job_id, login_url, captcha_url, username, password, bookdate, kssj, jssj, resources_name, target_time_str, num_threads, status FROM scheduled_jobs WHERE status IN ('scheduled','running')"
             )
             rows = cur.fetchall()
         for r in rows:
@@ -616,7 +614,7 @@ class BookingManager:
             try:
                 with self._db_pool.get_connection(auto_commit=False) as conn:
                     cur = conn.execute(
-                        "SELECT job_id FROM scheduled_jobs WHERE username=? AND bookdate=? AND kssj=? AND jssj=? AND resources_name=? AND status IN ('scheduled','waiting','running')",
+                        "SELECT job_id FROM scheduled_jobs WHERE username=? AND bookdate=? AND kssj=? AND jssj=? AND resources_name=? AND status IN ('scheduled','running')",
                         (username, bookdate, kssj, jssj, resources_name),
                     )
                     row = cur.fetchone()
@@ -692,6 +690,9 @@ class BookingManager:
                 self._cleanup_job(job_id, JobState.FAILED, username=username, bookdate=bookdate, kssj=kssj, jssj=jssj, resources_name=resources_name)
                 return
             resource_id, time_id = result
+
+            # 更新状态为 running，表示正在抢票
+            self._safe_update_status(job_id, JobState.RUNNING)
 
             barrier = threading.Barrier(num_threads)
             results_lock = threading.Lock()

@@ -262,7 +262,7 @@ def get_db_pool(db_path: str = None) -> 'DatabasePool':
     获取全局数据库连接池单例。
 
     Args:
-        db_path: 数据库路径，默认为 data/data.db
+        db_path: 数据库路径，默认使用 config.DATA_DIR/data.db
 
     Returns:
         DatabasePool 实例
@@ -274,8 +274,8 @@ def get_db_pool(db_path: str = None) -> 'DatabasePool':
     with _db_pool_lock:
         if _db_pool_instance is None:
             if db_path is None:
-                base_dir = os.path.dirname(os.path.abspath(__file__))
-                db_path = os.path.join(base_dir, "data", "data.db")
+                from .config import DATA_DIR
+                db_path = os.path.join(DATA_DIR, "data.db")
             # 确保目录存在
             os.makedirs(os.path.dirname(db_path), exist_ok=True)
             _db_pool_instance = DatabasePool(db_path)

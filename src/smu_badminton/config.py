@@ -71,6 +71,10 @@ RATE_LIMIT_JOBS_WINDOW = int(os.getenv("RATE_LIMIT_JOBS_WINDOW", "60"))
 # ========== Server config ==========
 UVICORN_RELOAD = os.getenv("UVICORN_RELOAD", "0").lower() in {"1", "true", "yes", "on"}
 
+# ========== Data path config ==========
+# Docker 环境使用 /app/data，本地开发使用项目目录下的 data
+DATA_DIR = os.getenv("DATA_DIR", "/app/data" if os.path.exists("/app/data") else str(BASE_DIR / "data"))
+
 # ========== User info defaults ==========
 DEFAULT_DEPT_CODE = os.getenv("DEFAULT_DEPT_CODE", "")
 DEFAULT_DEPT_NAME = os.getenv("DEFAULT_DEPT_NAME", "")
