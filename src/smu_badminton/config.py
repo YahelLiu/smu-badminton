@@ -71,6 +71,11 @@ RATE_LIMIT_JOBS_WINDOW = int(os.getenv("RATE_LIMIT_JOBS_WINDOW", "60"))
 # ========== OCR config ==========
 # OCR 模式: local (本地 NCNN), http (远程 RESTful API), tcp (远程 TCP API)
 OCR_MODE = os.getenv("OCR_MODE", "local").lower()
+if OCR_MODE not in ("local", "http", "tcp"):
+    import warnings
+    warnings.warn(f"无效的 OCR_MODE='{OCR_MODE}'，仅支持 local/http/tcp，回退为 local", UserWarning)
+    logging.getLogger(__name__).warning(f"无效的 OCR_MODE='{OCR_MODE}'，仅支持 local/http/tcp，回退为 local")
+    OCR_MODE = "local"
 # 远程 OCR HTTP 服务配置
 OCR_HTTP_HOST = os.getenv("OCR_HTTP_HOST", "127.0.0.1")
 OCR_HTTP_PORT = int(os.getenv("OCR_HTTP_PORT", "21600"))

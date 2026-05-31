@@ -149,15 +149,32 @@ def _predict_http(img_input: bytes) -> tuple:
     """
     url = f"http://{OCR_HTTP_HOST}:{OCR_HTTP_PORT}/api/ocr"
     b64 = base64.b64encode(img_input).decode("ascii")
-    resp = requests.post(url, json={"imageBase64": b64}, timeout=OCR_TIMEOUT)
-    resp.raise_for_status()
-    data = resp.json()
+    try:
+        resp = requests.post(url, json={"imageBase64": b64}, timeout=OCR_TIMEOUT)
+        resp.raise_for_status()
+    except requests.RequestException as e:
+        raise RuntimeError(f"OCR HTTP 请求失败: {OCR_HTTP_HOST}:{OCR_HTTP_PORT} — {e}") from e
+
+    try:
+        data = resp.json()
+    except ValueError as e:
+        raise RuntimeError(f"OCR HTTP 响应非 JSON: {resp.text[:200]}") from e
 
     if not data.get("success"):
-        raise RuntimeError(f"OCR HTTP 失败: {data.get('error', '未知错误')}")
+        raise RuntimeError(f"OCR HTTP 识别失败: {data.get('error', '未知错误')}")
+
+    if "result" not in data or "expression" not in data:
+        raise RuntimeError(
+            f"OCR HTTP 响应缺少必填字段 (result/expression), 可用字段: {list(data.keys())}"
+        )
+
+    try:
+        result = int(data["result"])
+    except (TypeError, ValueError) as e:
+        raise RuntimeError(f"OCR HTTP result 非整数: {data['result']}") from e
 
     return (
-        data["result"],
+        result,
         data["expression"],
         data.get("equalSymbol", 0),
         data.get("operator", 0),
@@ -172,18 +189,27 @@ def _predict_tcp(img_input: bytes) -> tuple:
 
     协议: 发送原始图片字节 + "<END>" 标记, 服务端返回表达式字符串后关闭连接。
     """
-    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
-        sock.settimeout(OCR_TIMEOUT)
-        sock.connect((OCR_TCP_HOST, OCR_TCP_PORT))
-        sock.sendall(img_input + b"<END>")
+    try:
+        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
+            sock.settimeout(OCR_TIMEOUT)
+            sock.connect((OCR_TCP_HOST, OCR_TCP_PORT))
+            sock.sendall(img_input + b"<END>")
 
-        chunks = []
-        while True:
-            chunk = sock.recv(4096)
-            if not chunk:
-                break
-            chunks.append(chunk)
-        response = b"".join(chunks).decode("utf-8").strip()
+            chunks = []
+            while True:
+                chunk = sock.recv(4096)
+                if not chunk:
+                    break
+                chunks.append(chunk)
+            response = b"".join(chunks).decode("utf-8").strip()
+    except socket.timeout as e:
+        raise RuntimeError(
+            f"OCR TCP 超时 ({OCR_TIMEOUT}s): {OCR_TCP_HOST}:{OCR_TCP_PORT}"
+        ) from e
+    except OSError as e:
+        raise RuntimeError(
+            f"OCR TCP 连接失败: {OCR_TCP_HOST}:{OCR_TCP_PORT} — {e}"
+        ) from e
 
     if not response:
         raise RuntimeError("OCR TCP 失败: 服务端返回空响应")
@@ -198,6 +224,16 @@ def _predict_tcp(img_input: bytes) -> tuple:
 
 # ============= 统一入口 =============
 
+def _ensure_bytes(img_input) -> bytes:
+    """确保 img_input 为 bytes 类型，文件路径自动读取。"""
+    if isinstance(img_input, bytes):
+        return img_input
+    if isinstance(img_input, str):
+        with open(img_input, "rb") as f:
+            return f.read()
+    raise ValueError("img_input must be str (file path) or bytes")
+
+
 def predict_validate_code(img_input):
     """
     识别验证码，根据 OCR_MODE 配置选择本地/远程方式。
@@ -208,16 +244,14 @@ def predict_validate_code(img_input):
         (result, expression, equal_symbol, operator, digit1, digit2)
     """
     if OCR_MODE == "http":
-        if not isinstance(img_input, bytes):
-            raise ValueError("HTTP OCR 模式需要传入 bytes 类型的图片数据")
+        image_bytes = _ensure_bytes(img_input)
         logger.debug(f"OCR HTTP: {OCR_HTTP_HOST}:{OCR_HTTP_PORT}")
-        return _predict_http(img_input)
+        return _predict_http(image_bytes)
 
     if OCR_MODE == "tcp":
-        if not isinstance(img_input, bytes):
-            raise ValueError("TCP OCR 模式需要传入 bytes 类型的图片数据")
+        image_bytes = _ensure_bytes(img_input)
         logger.debug(f"OCR TCP: {OCR_TCP_HOST}:{OCR_TCP_PORT}")
-        return _predict_tcp(img_input)
+        return _predict_tcp(image_bytes)
 
     # 默认 local 模式
     return _predict_local(img_input)
