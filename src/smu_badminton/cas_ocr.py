@@ -1,7 +1,22 @@
-﻿import cv2
+import logging
+import socket
+import base64
+
+import cv2
 import numpy as np
 import ncnn
-from PIL import Image
+import requests
+
+from .config import (
+    OCR_MODE,
+    OCR_HTTP_HOST,
+    OCR_HTTP_PORT,
+    OCR_TCP_HOST,
+    OCR_TCP_PORT,
+    OCR_TIMEOUT,
+)
+
+logger = logging.getLogger(__name__)
 
 # 配置参数（可根据实际模型调整）
 MEAN_VALUES = [123.675, 116.28, 103.53]
@@ -12,7 +27,7 @@ KEY_POINT_SYMBOL = [0.25, 0.58, 0.75]
 KEY_POINT_CHS = [0.15, 0.33, 0.46]
 CONFIG_THRESH = 200
 
-# 加载NCNN模型
+# ============= 本地 NCNN 推理 =============
 
 def load_ncnn_model(param_path, bin_path):
     net = ncnn.Net()
@@ -94,11 +109,8 @@ def calculate_operator(left, right, operator_type):
     else:
         return 0
 
-def predict_validate_code(img_input):
-    """
-    识别验证码
-    img_input: 可以是文件路径(str)或图片字节数据(bytes)
-    """
+def _predict_local(img_input):
+    """本地 NCNN 推理识别验证码。"""
     image = preprocess_img(img_input)
     h, w = image.shape[:2]
     # 1. 先识别等号类型
@@ -126,6 +138,89 @@ def predict_validate_code(img_input):
     result = calculate_operator(predicted_digit_1, predicted_digit_2, predicted_operator)
     expr = f"{predicted_digit_1} {get_operator_str_by_int(predicted_operator)} {predicted_digit_2} = {result}"
     return result, expr, predicted_equal_symbol, predicted_operator, predicted_digit_1, predicted_digit_2
+
+# ============= 远程 HTTP API =============
+
+def _predict_http(img_input: bytes) -> tuple:
+    """通过远程 RESTful API 识别验证码。
+
+    OCR Server API: POST /api/ocr, body: {"imageBase64": "<base64>"}
+    响应: {"success": bool, "expression": str, "result": int, ...}
+    """
+    url = f"http://{OCR_HTTP_HOST}:{OCR_HTTP_PORT}/api/ocr"
+    b64 = base64.b64encode(img_input).decode("ascii")
+    resp = requests.post(url, json={"imageBase64": b64}, timeout=OCR_TIMEOUT)
+    resp.raise_for_status()
+    data = resp.json()
+
+    if not data.get("success"):
+        raise RuntimeError(f"OCR HTTP 失败: {data.get('error', '未知错误')}")
+
+    return (
+        data["result"],
+        data["expression"],
+        data.get("equalSymbol", 0),
+        data.get("operator", 0),
+        data.get("digit1", 0),
+        data.get("digit2", 0),
+    )
+
+# ============= 远程 TCP API =============
+
+def _predict_tcp(img_input: bytes) -> tuple:
+    """通过远程 TCP API 识别验证码。
+
+    协议: 发送原始图片字节 + "<END>" 标记, 服务端返回表达式字符串后关闭连接。
+    """
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
+        sock.settimeout(OCR_TIMEOUT)
+        sock.connect((OCR_TCP_HOST, OCR_TCP_PORT))
+        sock.sendall(img_input + b"<END>")
+
+        chunks = []
+        while True:
+            chunk = sock.recv(4096)
+            if not chunk:
+                break
+            chunks.append(chunk)
+        response = b"".join(chunks).decode("utf-8").strip()
+
+    if not response:
+        raise RuntimeError("OCR TCP 失败: 服务端返回空响应")
+
+    # 解析表达式 "X op Y = Z"
+    try:
+        result = int(response.split("=")[-1].strip())
+    except (ValueError, IndexError):
+        raise RuntimeError(f"OCR TCP 返回格式异常: '{response}'")
+
+    return result, response, 0, 0, 0, 0
+
+# ============= 统一入口 =============
+
+def predict_validate_code(img_input):
+    """
+    识别验证码，根据 OCR_MODE 配置选择本地/远程方式。
+
+    img_input: 可以是文件路径(str)或图片字节数据(bytes)
+
+    Returns:
+        (result, expression, equal_symbol, operator, digit1, digit2)
+    """
+    if OCR_MODE == "http":
+        if not isinstance(img_input, bytes):
+            raise ValueError("HTTP OCR 模式需要传入 bytes 类型的图片数据")
+        logger.debug(f"OCR HTTP: {OCR_HTTP_HOST}:{OCR_HTTP_PORT}")
+        return _predict_http(img_input)
+
+    if OCR_MODE == "tcp":
+        if not isinstance(img_input, bytes):
+            raise ValueError("TCP OCR 模式需要传入 bytes 类型的图片数据")
+        logger.debug(f"OCR TCP: {OCR_TCP_HOST}:{OCR_TCP_PORT}")
+        return _predict_tcp(img_input)
+
+    # 默认 local 模式
+    return _predict_local(img_input)
 
 if __name__ == '__main__':
     # 测试

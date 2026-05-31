@@ -68,6 +68,18 @@ RATE_LIMIT_WINDOW = int(os.getenv("RATE_LIMIT_WINDOW", "10"))
 RATE_LIMIT_JOBS_MAX = int(os.getenv("RATE_LIMIT_JOBS_MAX", "300"))
 RATE_LIMIT_JOBS_WINDOW = int(os.getenv("RATE_LIMIT_JOBS_WINDOW", "60"))
 
+# ========== OCR config ==========
+# OCR 模式: local (本地 NCNN), http (远程 RESTful API), tcp (远程 TCP API)
+OCR_MODE = os.getenv("OCR_MODE", "local").lower()
+# 远程 OCR HTTP 服务配置
+OCR_HTTP_HOST = os.getenv("OCR_HTTP_HOST", "127.0.0.1")
+OCR_HTTP_PORT = int(os.getenv("OCR_HTTP_PORT", "21600"))
+# 远程 OCR TCP 服务配置
+OCR_TCP_HOST = os.getenv("OCR_TCP_HOST", "127.0.0.1")
+OCR_TCP_PORT = int(os.getenv("OCR_TCP_PORT", "21601"))
+# 远程 OCR 请求超时（秒）
+OCR_TIMEOUT = int(os.getenv("OCR_TIMEOUT", "10"))
+
 # ========== Server config ==========
 UVICORN_RELOAD = os.getenv("UVICORN_RELOAD", "0").lower() in {"1", "true", "yes", "on"}
 
