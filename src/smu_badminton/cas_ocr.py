@@ -2,9 +2,6 @@ import logging
 import socket
 import base64
 
-import cv2
-import numpy as np
-import ncnn
 import requests
 
 from .config import (
@@ -27,21 +24,42 @@ KEY_POINT_SYMBOL = [0.25, 0.58, 0.75]
 KEY_POINT_CHS = [0.15, 0.33, 0.46]
 CONFIG_THRESH = 200
 
-# ============= 本地 NCNN 推理 =============
+# ============= 本地 NCNN 推理（懒加载） =============
 
-def load_ncnn_model(param_path, bin_path):
-    net = ncnn.Net()
-    net.load_param(param_path)
-    net.load_model(bin_path)
-    return net
+_local_models = None
 
-# 修改为从'model/'目录加载
-MODEL_DIR = 'model/'
-digit_net = load_ncnn_model(MODEL_DIR + 'resnet34_digit_latest.fp32.param', MODEL_DIR + 'resnet34_digit_latest.fp32.bin')
-operator_net = load_ncnn_model(MODEL_DIR + 'resnet18_operator_latest.fp32.param', MODEL_DIR + 'resnet18_operator_latest.fp32.bin')
-equal_symbol_net = load_ncnn_model(MODEL_DIR + 'resnet18_equal_symbol_latest.fp32.param', MODEL_DIR + 'resnet18_equal_symbol_latest.fp32.bin')
+
+def _load_local_models():
+    """懒加载本地 NCNN 模型，仅 local 模式首次调用时执行。"""
+    global _local_models
+    if _local_models is not None:
+        return _local_models
+
+    import cv2
+    import numpy as np
+    import ncnn
+
+    model_dir = 'model/'
+
+    def _load(param_path, bin_path):
+        net = ncnn.Net()
+        net.load_param(param_path)
+        net.load_model(bin_path)
+        return net
+
+    _local_models = {
+        'cv2': cv2,
+        'np': np,
+        'ncnn': ncnn,
+        'digit_net': _load(model_dir + 'resnet34_digit_latest.fp32.param', model_dir + 'resnet34_digit_latest.fp32.bin'),
+        'operator_net': _load(model_dir + 'resnet18_operator_latest.fp32.param', model_dir + 'resnet18_operator_latest.fp32.bin'),
+        'equal_symbol_net': _load(model_dir + 'resnet18_equal_symbol_latest.fp32.param', model_dir + 'resnet18_equal_symbol_latest.fp32.bin'),
+    }
+    logger.info("本地 NCNN 模型加载完成")
+    return _local_models
 
 def split_img_by_ratio(image, start_ratio, end_ratio):
+    np = _local_models['np']
     h, w = image.shape[:2]
     if start_ratio > end_ratio:
         start_ratio, end_ratio = end_ratio, start_ratio
@@ -56,25 +74,26 @@ def preprocess_img(img_input):
     预处理图片
     img_input: 可以是文件路径(str)或图片字节数据(bytes)
     """
+    cv2 = _local_models['cv2']
+    np = _local_models['np']
     if isinstance(img_input, str):
-        # 文件路径
         img = cv2.imread(img_input)
     elif isinstance(img_input, bytes):
-        # 字节数据
         img_array = np.frombuffer(img_input, dtype=np.uint8)
         img = cv2.imdecode(img_array, cv2.IMREAD_COLOR)
     else:
         raise ValueError("img_input must be str (file path) or bytes")
-    
+
     gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
     _, binary = cv2.threshold(gray, CONFIG_THRESH, 255, cv2.THRESH_BINARY)
-    # 转为3通道
     image = cv2.merge([binary, binary, binary])
     return image
 
 def ncnn_predict(net, img):
+    cv2 = _local_models['cv2']
+    np = _local_models['np']
+    ncnn = _local_models['ncnn']
     img = cv2.resize(img, (224, 224))
-    # ncnn 只支持BGR uint8输入
     mat = ncnn.Mat.from_pixels(img, ncnn.Mat.PixelType.PIXEL_BGR, 224, 224)
     mean = np.array(MEAN_VALUES, dtype=np.float32)
     norm = np.array(NORM_VALUES, dtype=np.float32)
@@ -111,30 +130,29 @@ def calculate_operator(left, right, operator_type):
 
 def _predict_local(img_input):
     """本地 NCNN 推理识别验证码。"""
+    models = _load_local_models()
+    digit_net = models['digit_net']
+    operator_net = models['operator_net']
+    equal_symbol_net = models['equal_symbol_net']
+
     image = preprocess_img(img_input)
     h, w = image.shape[:2]
-    # 1. 先识别等号类型
     image_equal_symbol = split_img_by_ratio(image, EQUAL_SYMBOL_KEY_START, EQUAL_SYMBOL_KEY_END)
     predicted_equal_symbol = predict_by_model(equal_symbol_net, image_equal_symbol)
-    # 2. 根据等号类型选择分割点
     if predicted_equal_symbol == 0:
-        # 等号是中文，直接用 KEY_POINT_CHS
         key_point = KEY_POINT_CHS
         image_digit_1 = split_img_by_ratio(image, 0, key_point[0])
         img_operator = split_img_by_ratio(image, key_point[0], key_point[1])
         image_digit_2 = split_img_by_ratio(image, key_point[1], key_point[2])
     else:
-        # 等号是符号
         key_point = KEY_POINT_SYMBOL
         image_digit_1 = split_img_by_ratio(image, 0, key_point[0])
         img_operator = split_img_by_ratio(image, key_point[0], key_point[1])
         image_digit_2 = split_img_by_ratio(image, key_point[1], key_point[2])
 
-    # 4. 识别
     predicted_operator = predict_by_model(operator_net, img_operator)
     predicted_digit_1 = predict_by_model(digit_net, image_digit_1)
     predicted_digit_2 = predict_by_model(digit_net, image_digit_2)
-    # 5. 计算结果
     result = calculate_operator(predicted_digit_1, predicted_digit_2, predicted_operator)
     expr = f"{predicted_digit_1} {get_operator_str_by_int(predicted_operator)} {predicted_digit_2} = {result}"
     return result, expr, predicted_equal_symbol, predicted_operator, predicted_digit_1, predicted_digit_2

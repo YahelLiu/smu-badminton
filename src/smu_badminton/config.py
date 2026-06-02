@@ -2,6 +2,7 @@
 Configuration utilities loaded from .env.
 """
 
+import logging
 import os
 from pathlib import Path
 from urllib.parse import quote, urlencode
@@ -51,8 +52,6 @@ if SECRET_KEY == _SECRET_KEY_DEFAULT:
         "使用默认 SECRET_KEY 不安全！请在 .env 中设置 SECRET_KEY 环境变量。",
         UserWarning
     )
-    # 使用 logger 需要先配置
-    import logging
     logging.getLogger(__name__).warning("警告：使用默认 SECRET_KEY，存储的密码可被轻易解码！")
 
 AUTHORIZED_USERS = set(os.getenv("AUTHORIZED_USERS", "202540510004").split(","))
