@@ -38,3 +38,7 @@ docs/
 # Build
 dist/
 build/
+
+# Node.js (VitePress docs)
+node_modules/
+!Documents/docs

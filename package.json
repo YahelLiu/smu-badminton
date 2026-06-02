@@ -1,0 +1,14 @@
+{
+  "name": "smu-badminton-docs",
+  "private": true,
+  "version": "1.0.0",
+  "type": "module",
+  "scripts": {
+    "docs:dev": "vitepress dev Documents/docs",
+    "docs:build": "vitepress build Documents/docs",
+    "docs:preview": "vitepress preview Documents/docs"
+  },
+  "devDependencies": {
+    "vitepress": "^2.0.0-alpha.12"
+  }
+}
