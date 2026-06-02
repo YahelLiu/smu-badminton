@@ -2,6 +2,7 @@
 Configuration utilities loaded from .env.
 """
 
+import logging
 import os
 from pathlib import Path
 from urllib.parse import quote, urlencode
@@ -51,8 +52,6 @@ if SECRET_KEY == _SECRET_KEY_DEFAULT:
         "使用默认 SECRET_KEY 不安全！请在 .env 中设置 SECRET_KEY 环境变量。",
         UserWarning
     )
-    # 使用 logger 需要先配置
-    import logging
     logging.getLogger(__name__).warning("警告：使用默认 SECRET_KEY，存储的密码可被轻易解码！")
 
 AUTHORIZED_USERS = set(os.getenv("AUTHORIZED_USERS", "202540510004").split(","))
@@ -67,6 +66,23 @@ RATE_LIMIT_MAX = int(os.getenv("RATE_LIMIT_MAX", "30"))
 RATE_LIMIT_WINDOW = int(os.getenv("RATE_LIMIT_WINDOW", "10"))
 RATE_LIMIT_JOBS_MAX = int(os.getenv("RATE_LIMIT_JOBS_MAX", "300"))
 RATE_LIMIT_JOBS_WINDOW = int(os.getenv("RATE_LIMIT_JOBS_WINDOW", "60"))
+
+# ========== OCR config ==========
+# OCR 模式: local (本地 NCNN), http (远程 RESTful API), tcp (远程 TCP API)
+OCR_MODE = os.getenv("OCR_MODE", "local").lower()
+if OCR_MODE not in ("local", "http", "tcp"):
+    import warnings
+    warnings.warn(f"无效的 OCR_MODE='{OCR_MODE}'，仅支持 local/http/tcp，回退为 local", UserWarning)
+    logging.getLogger(__name__).warning(f"无效的 OCR_MODE='{OCR_MODE}'，仅支持 local/http/tcp，回退为 local")
+    OCR_MODE = "local"
+# 远程 OCR HTTP 服务配置
+OCR_HTTP_HOST = os.getenv("OCR_HTTP_HOST", "127.0.0.1")
+OCR_HTTP_PORT = int(os.getenv("OCR_HTTP_PORT", "21600"))
+# 远程 OCR TCP 服务配置
+OCR_TCP_HOST = os.getenv("OCR_TCP_HOST", "127.0.0.1")
+OCR_TCP_PORT = int(os.getenv("OCR_TCP_PORT", "21601"))
+# 远程 OCR 请求超时（秒）
+OCR_TIMEOUT = int(os.getenv("OCR_TIMEOUT", "10"))
 
 # ========== Server config ==========
 UVICORN_RELOAD = os.getenv("UVICORN_RELOAD", "0").lower() in {"1", "true", "yes", "on"}
