@@ -1,134 +1,107 @@
-﻿import cv2
-import numpy as np
-import ncnn
-from PIL import Image
+"""CAS 算式验证码识别（数字 运算符 数字 = ?）。
 
-# 配置参数（可根据实际模型调整）
-MEAN_VALUES = [123.675, 116.28, 103.53]
-NORM_VALUES = [1/58.395, 1/57.12, 1/57.375]
-EQUAL_SYMBOL_KEY_START = 0.7
-EQUAL_SYMBOL_KEY_END = 1.0
-KEY_POINT_SYMBOL = [0.25, 0.58, 0.75]
-KEY_POINT_CHS = [0.15, 0.33, 0.46]
-CONFIG_THRESH = 200
+历史实现用自训 NCNN ResNet 三模型（数字 / 运算符 / 等号类型）+ 固定比例切分。
+网站换字体后这三个自训模型失效（认不出新字体的运算符与数字），且无训练设施可重训，
+固定比例切分对新版面也不再对——双重失效。现改用 ddddocr 整图识别 + 正则提取首个
+`数字 运算符 数字` 求值，绕开切分与自训模型。ddddocr 对数字与常见运算符识别稳定，
+样本（9 + 3 = ?）实测输出 '9+32'，正则正确抓到 9+3。
 
-# 加载NCNN模型
+接口 (result, expr, eq_sym, op_code, d1, d2) 与旧实现保持一致，上层 cas_login
+(`result, *_ = predict_validate_code(...)`) 无需改动。
+"""
+import re
+import threading
+from pathlib import Path
 
-def load_ncnn_model(param_path, bin_path):
-    net = ncnn.Net()
-    net.load_param(param_path)
-    net.load_model(bin_path)
-    return net
+import ddddocr
 
-# 修改为从'model/'目录加载
-MODEL_DIR = 'model/'
-digit_net = load_ncnn_model(MODEL_DIR + 'resnet34_digit_latest.fp32.param', MODEL_DIR + 'resnet34_digit_latest.fp32.bin')
-operator_net = load_ncnn_model(MODEL_DIR + 'resnet18_operator_latest.fp32.param', MODEL_DIR + 'resnet18_operator_latest.fp32.bin')
-equal_symbol_net = load_ncnn_model(MODEL_DIR + 'resnet18_equal_symbol_latest.fp32.param', MODEL_DIR + 'resnet18_equal_symbol_latest.fp32.bin')
+# ddddocr 实例惰性加载（onnx 模型加载较重；InferenceSession 推理用锁串行化以策安全）。
+_OCR: "ddddocr.DdddOcr | None" = None
+_OCR_LOCK = threading.Lock()
 
-def split_img_by_ratio(image, start_ratio, end_ratio):
-    h, w = image.shape[:2]
-    if start_ratio > end_ratio:
-        start_ratio, end_ratio = end_ratio, start_ratio
-    x1 = int(w * start_ratio)
-    x2 = int(w * end_ratio)
-    if end_ratio >= 1:
-        x2 = w
-    return image[:, x1:x2].copy()
 
-def preprocess_img(img_input):
-    """
-    预处理图片
-    img_input: 可以是文件路径(str)或图片字节数据(bytes)
-    """
+def _get_ocr() -> "ddddocr.DdddOcr":
+    global _OCR
+    if _OCR is None:
+        with _OCR_LOCK:
+            if _OCR is None:
+                _OCR = ddddocr.DdddOcr(show_ad=False)
+    return _OCR
+
+
+# 算式验证码格式恒为: 单数字 运算符 单数字 = ?  (仅 + - *)
+# 抓首个 `数字 运算符 数字` 三元组即可，结尾的 = ? 噪声被忽略。
+# 运算符字符类覆盖 ddddocr 可能的输出: + - * 以及 * 的常见误读 x X ×。
+_CAPTCHA_RE = re.compile(r"(\d)\s*([+\-*/xX×÷])\s*(\d)")
+
+_OP_NORMALIZE = {
+    "+": "+",
+    "-": "-",
+    "*": "*",
+    "x": "*",
+    "X": "*",
+    "×": "*",
+}
+
+# 运算符类型码，与旧 get_operator_str_by_int 保持一致(0->+, 2->-, 4->*)。
+_OP_CODE = {"+": 0, "-": 2, "*": 4}
+
+
+def _read_bytes(img_input) -> bytes:
+    """img_input: str(文件路径，支持中文路径) 或 bytes(图片字节数据)。"""
+    if isinstance(img_input, (bytes, bytearray)):
+        return bytes(img_input)
     if isinstance(img_input, str):
-        # 文件路径
-        img = cv2.imread(img_input)
-    elif isinstance(img_input, bytes):
-        # 字节数据
-        img_array = np.frombuffer(img_input, dtype=np.uint8)
-        img = cv2.imdecode(img_array, cv2.IMREAD_COLOR)
-    else:
-        raise ValueError("img_input must be str (file path) or bytes")
-    
-    gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
-    _, binary = cv2.threshold(gray, CONFIG_THRESH, 255, cv2.THRESH_BINARY)
-    # 转为3通道
-    image = cv2.merge([binary, binary, binary])
-    return image
+        # 用 pathlib 读字节，规避 cv2.imread 不支持非 ASCII(中文)路径的问题。
+        return Path(img_input).read_bytes()
+    raise ValueError("img_input must be str (file path) or bytes")
 
-def ncnn_predict(net, img):
-    img = cv2.resize(img, (224, 224))
-    # ncnn 只支持BGR uint8输入
-    mat = ncnn.Mat.from_pixels(img, ncnn.Mat.PixelType.PIXEL_BGR, 224, 224)
-    mean = np.array(MEAN_VALUES, dtype=np.float32)
-    norm = np.array(NORM_VALUES, dtype=np.float32)
-    mat.substract_mean_normalize(mean, norm)
-    ex = net.create_extractor()
-    ex.input("input", mat)
-    out = ncnn.Mat()
-    ex.extract("output", out)
-    out_np = np.array(out)
-    return int(np.argmax(out_np))
 
-def predict_by_model(model, img):
-    return ncnn_predict(model, img)
+def _apply_op(op: str, a: int, b: int) -> int:
+    if op == "+":
+        return a + b
+    if op == "-":
+        return a - b
+    if op == "*":
+        return a * b
+    raise ValueError(f"unsupported operator: {op}")
 
-def get_operator_str_by_int(type_):
-    if type_ in [0, 1]:
-        return "+"
-    elif type_ in [2, 3]:
-        return "-"
-    elif type_ in [4, 5]:
-        return "*"
-    else:
-        return ""
-
-def calculate_operator(left, right, operator_type):
-    if operator_type in [0, 1]:
-        return left + right
-    elif operator_type in [2, 3]:
-        return left - right
-    elif operator_type in [4, 5]:
-        return left * right
-    else:
-        return 0
 
 def predict_validate_code(img_input):
-    """
-    识别验证码
-    img_input: 可以是文件路径(str)或图片字节数据(bytes)
-    """
-    image = preprocess_img(img_input)
-    h, w = image.shape[:2]
-    # 1. 先识别等号类型
-    image_equal_symbol = split_img_by_ratio(image, EQUAL_SYMBOL_KEY_START, EQUAL_SYMBOL_KEY_END)
-    predicted_equal_symbol = predict_by_model(equal_symbol_net, image_equal_symbol)
-    # 2. 根据等号类型选择分割点
-    if predicted_equal_symbol == 0:
-        # 等号是中文，直接用 KEY_POINT_CHS
-        key_point = KEY_POINT_CHS
-        image_digit_1 = split_img_by_ratio(image, 0, key_point[0])
-        img_operator = split_img_by_ratio(image, key_point[0], key_point[1])
-        image_digit_2 = split_img_by_ratio(image, key_point[1], key_point[2])
-    else:
-        # 等号是符号
-        key_point = KEY_POINT_SYMBOL
-        image_digit_1 = split_img_by_ratio(image, 0, key_point[0])
-        img_operator = split_img_by_ratio(image, key_point[0], key_point[1])
-        image_digit_2 = split_img_by_ratio(image, key_point[1], key_point[2])
+    """识别算式验证码，返回 (result, expr, eq_sym, op_code, d1, d2)。
 
-    # 4. 识别
-    predicted_operator = predict_by_model(operator_net, img_operator)
-    predicted_digit_1 = predict_by_model(digit_net, image_digit_1)
-    predicted_digit_2 = predict_by_model(digit_net, image_digit_2)
-    # 5. 计算结果
-    result = calculate_operator(predicted_digit_1, predicted_digit_2, predicted_operator)
-    expr = f"{predicted_digit_1} {get_operator_str_by_int(predicted_operator)} {predicted_digit_2} = {result}"
-    return result, expr, predicted_equal_symbol, predicted_operator, predicted_digit_1, predicted_digit_2
+    img_input: str(文件路径) 或 bytes(图片字节数据)。
 
-if __name__ == '__main__':
-    # 测试
-    img_path = r'captcha\captcha_1752206184778.jpg'
-    result, expr, *_ = predict_validate_code(img_path)
-    print("识别表达式：", expr)
+    用 ddddocr 整图识别后，正则提取首个 `数字 运算符 数字` 求值。
+
+    重要: 本函数绝不抛异常。识别失败时返回 result=-1 的哨兵值——
+    cas_login 的 `except Exception` 会把任何异常当成 NETWORK_ERROR 硬失败而非验证码重试，
+    所以必须走「返回错误答案 -> 服务端判 CAPTCHA_ERROR -> 重试」的容错路径。
+    """
+    img_bytes = _read_bytes(img_input)
+    raw = _get_ocr().classification(img_bytes)
+
+    m = _CAPTCHA_RE.search(raw)
+    if not m:
+        # 抓不到 `数字 运算符 数字`: 返回哨兵，让上层 CAPTCHA_ERROR 重试。
+        return -1, f"OCR 识别失败: {raw!r}", 0, 0, 0, 0
+
+    d1 = int(m.group(1))
+    op = _OP_NORMALIZE.get(m.group(2))
+    d2 = int(m.group(3))
+    if op is None:
+        return -1, f"OCR 未知运算符: {raw!r}", 0, 0, d1, d2
+
+    result = _apply_op(op, d1, d2)
+    expr = f"{d1} {op} {d2} = {result}"
+    return result, expr, 0, _OP_CODE[op], d1, d2
+
+
+if __name__ == "__main__":
+    import sys
+
+    if len(sys.argv) < 2:
+        print("用法: python -m smu_badminton.cas_ocr <验证码图片路径>")
+        sys.exit(2)
+    r, expr, *_ = predict_validate_code(sys.argv[1])
+    print(f"识别: result={r}  expr={expr}")

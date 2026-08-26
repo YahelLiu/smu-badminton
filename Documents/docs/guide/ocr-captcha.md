@@ -2,174 +2,80 @@
 
 ## 概述
 
-上海海事大学 CAS 登录使用算术验证码（如 `3 + 5 = ?`），SMU Badminton 集成了 OCR 自动识别功能，支持本地推理和远程服务两种方式。
+上海海事大学 CAS 登录使用算术验证码（如 `9 + 3 = ?`），SMU Badminton 在本地用
+[ddddocr](https://github.com/sml2h3/ddddocr) 整图识别 + 正则提取算式并求值，无需额外服务部署。
 
 ## 验证码类型
 
-CAS 验证码为算术表达式图片，格式为 `数字 运算符 数字 = ?`，其中：
+CAS 验证码为算术表达式图片，格式恒为 `数字 运算符 数字 = ?`，其中：
 
-- **数字**：0-9 的单个数字
+- **数字**：0-9 单个数字
 - **运算符**：加（+）、减（-）、乘（*）
-- **等号**：可能为中文等号或符号等号
+- 结尾 `= ?` 为固定噪声，识别时忽略
 
-系统需要识别表达式并计算结果作为验证码答案。
+系统识别表达式并计算结果作为验证码答案。
 
-## 三种 OCR 模式
+## 实现位置
 
-### 本地 NCNN 模式（local）
-
-默认模式，在本地使用 NCNN 推理框架运行 ResNet 模型。
-
-**优点：**
-- 无需额外服务部署
-- 延迟最低
-- 无网络依赖
-
-**缺点：**
-- 需要 OpenCV 和 NCNN 运行时
-- 占用本机 CPU 资源
-- 模型文件需单独准备（约数十 MB）
-
-**配置：**
-
-```env
-OCR_MODE=local
-```
-
-**模型文件：**
-
-```
-model/
-  resnet34_digit_latest.fp32.param       # 数字识别模型参数
-  resnet34_digit_latest.fp32.bin         # 数字识别模型权重
-  resnet18_operator_latest.fp32.param    # 运算符识别模型参数
-  resnet18_operator_latest.fp32.bin      # 运算符识别模型权重
-  resnet18_equal_symbol_latest.fp32.param  # 等号类型检测模型参数
-  resnet18_equal_symbol_latest.fp32.bin    # 等号类型检测模型权重
-```
-
-> 模型文件被 gitignore，需单独获取并放入 `model/` 目录。模型采用懒加载机制，仅首次调用时加载。
-
-### 远程 HTTP API 模式（http）
-
-通过 RESTful API 调用远程 OCR 服务（如 shmtu-cas-ocr-server）。
-
-**优点：**
-- 不占用本机资源
-- 可共享给多个实例使用
-- 支持独立扩缩容
-
-**缺点：**
-- 需要额外部署 OCR 服务
-- 网络延迟
-- 服务不可用时降级
-
-**配置：**
-
-```env
-OCR_MODE=http
-OCR_HTTP_HOST=127.0.0.1
-OCR_HTTP_PORT=21600
-OCR_TIMEOUT=10
-```
-
-**API 协议：**
-
-```
-POST /api/ocr
-Content-Type: application/json
-
-{
-  "imageBase64": "<base64 编码的验证码图片>"
-}
-```
-
-**响应格式：**
-
-```json
-{
-  "success": true,
-  "expression": "3 + 5 = 8",
-  "result": 8,
-  "equalSymbol": 1,
-  "operator": 2,
-  "digit1": 3,
-  "digit2": 5
-}
-```
-
-### 远程 TCP API 模式（tcp）
-
-通过自定义 TCP 协议调用远程 OCR 服务。
-
-**优点：**
-- 比 HTTP 延迟更低
-- 协议简单高效
-
-**缺点：**
-- 需要额外部署 OCR 服务
-- 无 HTTP 标准化支持
-
-**配置：**
-
-```env
-OCR_MODE=tcp
-OCR_TCP_HOST=127.0.0.1
-OCR_TCP_PORT=21601
-OCR_TIMEOUT=10
-```
-
-**TCP 协议：**
-
-1. 客户端发送原始图片字节 + `<END>` 标记
-2. 服务端返回表达式字符串（如 `3 + 5 = 8`）后关闭连接
-3. 客户端解析 `=` 后面的数字作为结果
+识别逻辑全部在 `src/smu_badminton/cas_ocr.py` 的 `predict_validate_code(img_input)`，
+被 `src/smu_badminton/cas_login.py` 在登录流程中调用。接口返回
+`(result, expr, eq_sym, op_code, d1, d2)`，上层只用 `result`（答案）与 `expr`（日志）。
 
 ## 识别流程
 
-### 本地 NCNN 识别流程
-
 ```
-1. 预处理图片
-   - 灰度化 -> 二值化（阈值 200）-> 合并为三通道
+1. 读图(img_input 为 str 路径或 bytes；路径用 pathlib 读字节，规避 cv2 中文路径问题)
    |
-2. 检测等号类型
-   - 裁剪右侧区域（70%-100%）-> ResNet18 分类
-   - 0: 中文等号 -> 使用 KEY_POINT_CHS 分割点
-   - 其他: 符号等号 -> 使用 KEY_POINT_SYMBOL 分割点
+2. ddddocr 整图分类 -> 原始字符串(如 '9+32')
+   - DdddOcr(show_ad=False) 惰性单例加载，onnxruntime 本地推理
    |
-3. 分割图片区域
-   - 根据 key_point 裁剪出：数字1、运算符、数字2
+3. 正则提取首个 `数字 运算符 数字`
+   - 正则: (\d)\s*([+\-*/xX×÷])\s*(\d)
+   - 取首个三元组，忽略结尾 = ? 噪声('9+32' -> 9, +, 3)
    |
-4. 分别识别
-   - 数字1 -> ResNet34 分类（0-9）
-   - 运算符 -> ResNet18 分类（+, -, *）
-   - 数字2 -> ResNet34 分类（0-9）
+4. 运算符归一化
+   - + -> +；- -> -；* / x / X / × -> *
    |
-5. 计算结果
-   - 根据识别的数字和运算符计算算术结果
+5. 求值返回
+   - result = d1 OP d2；expr = "d1 OP d2 = result"
+   - 失败(抓不到三元组 / 未知运算符): 返回 result=-1 哨兵，绝不抛异常
 ```
-
-### 预处理参数
-
-| 参数 | 值 | 说明 |
-|------|----|------|
-| 二值化阈值 | 200 | 灰度图二值化阈值 |
-| 输入尺寸 | 224x224 | 模型输入图片尺寸 |
-| 均值 | [123.675, 116.28, 103.53] | ImageNet 标准均值 |
-| 标准差倒数 | [1/58.395, 1/57.12, 1/57.375] | ImageNet 标准差倒数 |
 
 ### 运算符映射
 
-| 分类值 | 运算符 |
+返回元组里的 `op_code` 与历史一致：
+
+| op_code | 运算符 |
 |--------|--------|
-| 0, 1 | +（加） |
-| 2, 3 | -（减） |
-| 4, 5 | *（乘） |
+| 0 | +（加） |
+| 2 | -（减） |
+| 4 | *（乘） |
 
 ## 容错机制
 
-- 本地模型懒加载：仅在首次调用时加载，避免启动时阻塞
-- 远程服务超时：`OCR_TIMEOUT` 控制超时时间（默认 10 秒）
-- 无效模式回退：`OCR_MODE` 值无效时自动回退为 `local`
-- 登录重试：OCR 识别失败（验证码错误）时，前端可切换手动输入模式
+- **不抛异常**：识别失败时返回 `result=-1`。cas_login 的 `except Exception` 会把异常
+  当成 NETWORK_ERROR 硬失败而非验证码重试，因此必须走「错误答案 → 服务端判 CAPTCHA_ERROR → 重试」路径。
+- **登录重试**：`login_with_auto_captcha` 默认 OCR 2 次 + 外层 `login_with_retry` 3 次，
+  偶发识别失败会被重试消化；全部失败则回退手动输入验证码。
+- **惰性加载**：`DdddOcr` 实例首次调用时创建，避免启动阻塞。
+
+## 依赖
+
+```bash
+pip install ddddocr
+```
+
+> 清华 tuna 镜像可能不收录 ddddocr；镜像装失败时用官方源：
+> `pip install ddddocr -i https://pypi.org/simple`
+
+## 历史实现（已弃用）
+
+此前用自训 NCNN ResNet 三模型（数字 `resnet34_digit_*` / 运算符 `resnet18_operator_*` /
+等号类型 `resnet18_equal_symbol_*`）+ 固定比例切分（`KEY_POINT_CHS` / `KEY_POINT_SYMBOL`），
+并依赖灰度二值化（阈值 200）、224x224、ImageNet 均值/标准差倒数预处理。网站换字体后这三个
+自训模型失效（认不出新字体的运算符/数字）且无法重训（无训练设施），固定比例切分对新版面也错位，
+故整体替换为 ddddocr 整图方案。`model/` 目录（gitignored）可能仍存有旧模型文件但不再加载，
+`ncnn` 依赖已从 requirements.txt 移除。
+
+> 本文档曾描述 local / http / tcp 三种 `OCR_MODE` 远程模式——这些在当前代码中**未实现**，
+> `OCR_MODE` 环境变量不存在，仅有上述本地 ddddocr 单一路径。

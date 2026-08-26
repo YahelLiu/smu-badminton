@@ -12,10 +12,13 @@ beautifulsoup4==4.13.4
 lxml==6.0.0
 
 # Image processing & OCR
+# ddddocr: 算式验证码整图识别(数字/运算符)。自训 NCNN ResNet 换字体后失效且无法重训，已弃用。
+# 注意: 清华 tuna 镜像可能不收录 ddddocr; 镜像装失败时改用官方源:
+#   pip install ddddocr -i https://pypi.org/simple
 pillow==11.3.0
 opencv-python==4.12.0.88
-ncnn==1.0.20250503
 numpy==2.2.6
+ddddocr>=1.4.7
 
 # Utilities
 tqdm==4.67.1

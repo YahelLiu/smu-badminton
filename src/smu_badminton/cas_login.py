@@ -8,6 +8,8 @@ CAS 认证流程模块。
 - extract_oidc_tokens 失败返回 None（而非空字典）
 - 所有公开函数参数顺序：必需参数在前，可选参数在后
 """
+import base64
+import json
 import requests
 from urllib.parse import urlparse, parse_qs, urlencode, quote, urljoin, unquote
 from lxml import html
@@ -87,13 +89,29 @@ def _build_wf_authorize_url(ret_url: str | None = None) -> str:
     return f"{WF_ORIGIN}/sso/oauth2/authorize?{urlencode(params, quote_via=quote)}"
 
 
+def _is_cas_login_url(url: str) -> bool:
+    """判断 URL 是否为 CAS 登录页。
+
+    兼容迁移前的 cas.shmtu.edu.cn 与迁移后的 sso.shmtu.edu.cn：只要 netloc 属于
+    shmtu.edu.cn 且 path 以 /cas/login 开头即认定，日后再次更换主机名也不会失配。
+    用 urlparse 取 netloc/path，避免被 service= 等查询参数里的子串误判。
+    """
+    if not url:
+        return False
+    try:
+        parsed = urlparse(url)
+    except Exception:
+        return False
+    return parsed.netloc.lower().endswith("shmtu.edu.cn") and parsed.path.startswith("/cas/login")
+
+
 def _resolve_cas_login_url(session: requests.Session, login_url: str | None, timeout: int = 20) -> str:
     """沿着 WF -> SSO 重定向链解析 CAS 登录 URL。"""
     start = (login_url or "").strip()
     lower_start = start.lower()
 
-    # 直接就是 CAS 登录地址
-    if "cas.shmtu.edu.cn/cas/login" in lower_start:
+    # 直接就是 CAS 登录地址（兼容 cas./sso. 主机）
+    if _is_cas_login_url(start):
         return start
 
     # 已经是 oauth2 authorize 地址
@@ -113,16 +131,16 @@ def _resolve_cas_login_url(session: requests.Session, login_url: str | None, tim
     headers = {"User-Agent": "Mozilla/5.0"}
     for _ in range(10):
         resp = session.get(current, headers=headers, timeout=timeout, allow_redirects=False)
-        if "cas.shmtu.edu.cn/cas/login" in current.lower():
+        if _is_cas_login_url(current):
             return current
 
         location = _absolute_url(current, resp.headers.get("Location", ""))
         if not location:
-            if resp.status_code == 200 and "cas.shmtu.edu.cn/cas/login" in current.lower():
+            if resp.status_code == 200 and _is_cas_login_url(current):
                 return current
             break
 
-        if "cas.shmtu.edu.cn/cas/login" in location.lower():
+        if _is_cas_login_url(location):
             return location
         current = location
 
@@ -223,18 +241,70 @@ def _extract_tokens_after_login(session: requests.Session, cas_login_url: str, p
     return None
 
 
-def _prepare_login_session_core(login_url: str, captcha_url: str | None = None) -> Tuple[requests.Session, str, str, bytes, str]:
+def _derive_captcha_url(cas_login_url: str, captcha_url: str | None) -> str:
+    """推导验证码 URL，确保与登录页同源。
+
+    验证码是 session 绑定的（JSESSIONID）：必须从登录页所在 host 抓取，否则提交的
+    validateCode/captchaToken 与服务端记录不符，必判验证码错误。优先用显式传入的
+    captcha_url（仅当其 host 与登录页一致）；否则从解析到的登录页 host 推导，避免
+    .env 残留旧 cas. 地址导致跨 host 抓取（这正是旧版登录必挂的根因之一）。
+    """
+    login_host = urlparse(cas_login_url).netloc.lower() if cas_login_url else ""
+    if captcha_url and captcha_url.strip():
+        cap_host = urlparse(captcha_url.strip()).netloc.lower()
+        if not login_host or cap_host == login_host:
+            return captcha_url.strip()
+    if login_host:
+        scheme = urlparse(cas_login_url).scheme or "https"
+        return f"{scheme}://{login_host}/cas/captcha"
+    return CAS_CAPTCHA_URL
+
+
+def _fetch_captcha_challenge(session: requests.Session, captcha_url: str, headers: dict | None = None) -> Tuple[bytes, str]:
+    """获取验证码挑战，返回 (image_bytes, token)。
+
+    新版 /cas/captcha 返回 JSON: {"image":"data:image/png;base64,...","token":"v1...","expiresAt":<ms>}；
+    旧版直接返回 PNG bytes（token 为空串）。对两者均兼容。带 ?_=<ms> 缓存破坏；
+    session 自带 JSESSIONID，须与登录页同源（由 _derive_captcha_url 保证）。
+    """
+    url = (captcha_url or CAS_CAPTCHA_URL).strip()
+    params = {"_": str(int(time.time() * 1000))}
+    resp = session.get(url, params=params, headers=headers, timeout=15)
+    content_type = resp.headers.get("Content-Type", "").lower()
+    # 新版 JSON（按 Content-Type 或首字符嗅探）
+    if "json" in content_type or resp.content[:1] == b"{":
+        try:
+            obj = resp.json()
+        except Exception:
+            obj = {}
+        data_url = obj.get("image", "") or ""
+        token = obj.get("token", "") or ""
+        if data_url.startswith("data:") and "," in data_url:
+            b64 = data_url.split(",", 1)[1]
+            try:
+                return base64.b64decode(b64), token
+            except Exception:
+                return b"", token
+        # 兜底：image 字段直接是裸 base64
+        try:
+            return base64.b64decode(data_url), token
+        except Exception:
+            return b"", token
+    # 旧版：直接是图片 bytes
+    return resp.content, ""
+
+
+def _prepare_login_session_core(login_url: str, captcha_url: str | None = None) -> Tuple[requests.Session, str, str, bytes, str, str]:
     """准备登录会话的核心逻辑。
 
     Args:
         login_url: 登录入口 URL
-        captcha_url: 验证码 URL（可选）
+        captcha_url: 验证码 URL（可选，仅当 host 与登录页一致时采用）
 
     Returns:
-        Tuple: (session, cas_login_url, execution_value, captcha_image_bytes, login_page_html)
+        Tuple: (session, cas_login_url, execution_value, captcha_image_bytes, captcha_token, login_page_html)
     """
     session = requests.Session()
-    captcha_url = (captcha_url or CAS_CAPTCHA_URL).strip()
     headers = {
         "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/137.0.0.0 Safari/537.36"
     }
@@ -242,7 +312,7 @@ def _prepare_login_session_core(login_url: str, captcha_url: str | None = None) 
     # 解析 CAS 登录 URL
     cas_login_url = _resolve_cas_login_url(session, login_url, timeout=20)
 
-    # 获取登录页面
+    # 获取登录页面（同时绑定 JSESSIONID）
     login_resp = session.get(cas_login_url, headers=headers, timeout=20)
     login_page_html = login_resp.text
 
@@ -251,19 +321,19 @@ def _prepare_login_session_core(login_url: str, captcha_url: str | None = None) 
     if not execution_value:
         raise RuntimeError("无法获取 execution 参数")
 
-    # 获取验证码图片
-    captcha_resp = session.get(captcha_url, headers=headers, timeout=15)
-    captcha_image = captcha_resp.content
+    # 获取验证码（新版 JSON：image base64 + token），须与登录页同源
+    captcha_url = _derive_captcha_url(cas_login_url, captcha_url)
+    captcha_image, captcha_token = _fetch_captcha_challenge(session, captcha_url, headers=headers)
 
-    return session, cas_login_url, execution_value, captcha_image, login_page_html
+    return session, cas_login_url, execution_value, captcha_image, captcha_token, login_page_html
 
 
 def get_captcha_and_params(login_url, captcha_url):
-    """从 WF 流程解析 CAS 登录地址，并获取验证码与 execution。"""
-    session, cas_login_url, execution_value, captcha_image, _ = _prepare_login_session_core(login_url, captcha_url)
+    """从 WF 流程解析 CAS 登录地址，并获取验证码、token 与 execution。"""
+    session, cas_login_url, execution_value, captcha_image, captcha_token, _ = _prepare_login_session_core(login_url, captcha_url)
     # OCR 识别验证码
     result, *_ = predict_validate_code(captcha_image)
-    return session, cas_login_url, execution_value, result
+    return session, cas_login_url, execution_value, result, captcha_token
 
 
 # cas_login 已移除，统一使用 cas_login_stable
@@ -297,12 +367,15 @@ def _stable_detect_event_order(html_text: str):
     return ["submit"]
 
 
-def _stable_download_captcha(session: requests.Session, captcha_url: str) -> str:
-    captcha_url = (captcha_url or CAS_CAPTCHA_URL).strip()
-    # 在内存中 OCR 验证码
-    r = session.get(captcha_url, timeout=15)
-    code, *_ = predict_validate_code(r.content)
-    return code
+def _stable_download_captcha(session: requests.Session, cas_login_url: str, captcha_url: str | None) -> Tuple[str, str]:
+    """获取并 OCR 验证码，返回 (code, token)。
+
+    验证码 URL 从 cas_login_url 推导以保证同源（见 _derive_captcha_url）。
+    """
+    url = _derive_captcha_url(cas_login_url, captcha_url)
+    img, token = _fetch_captcha_challenge(session, url)
+    code, *_ = predict_validate_code(img)
+    return code, token
 
 
 def cas_login_stable(login_url, captcha_url, username, password) -> LoginResult:
@@ -331,7 +404,7 @@ def cas_login_stable(login_url, captcha_url, username, password) -> LoginResult:
             continue
 
         event_order = _stable_detect_event_order(login_resp.text)
-        captcha = _stable_download_captcha(session, captcha_url)
+        captcha, captcha_token = _stable_download_captcha(session, cas_url, captcha_url)
         headers_post = {
             "User-Agent": headers_get["User-Agent"],
             "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8",
@@ -348,6 +421,8 @@ def cas_login_stable(login_url, captcha_url, username, password) -> LoginResult:
                 "_eventId": evt,
                 "geolocation": "",
                 "validateCode": captcha,
+                "captchaToken": captcha_token,
+                "deviceFingerprint": "",
             }
             try:
                 post_resp = session.post(cas_url, data=data, headers=headers_post, allow_redirects=False, timeout=20)
@@ -438,7 +513,7 @@ def _detect_login_error(html_text: str) -> LoginErrorType:
     return LoginErrorType.UNKNOWN_ERROR
 
 
-def prepare_login_session(login_url: str, captcha_url: str | None = None) -> Tuple[requests.Session, str, str, bytes, str]:
+def prepare_login_session(login_url: str, captcha_url: str | None = None) -> Tuple[requests.Session, str, str, bytes, str, str]:
     """准备登录会话，获取验证码图片和必要的参数。
 
     Args:
@@ -446,11 +521,11 @@ def prepare_login_session(login_url: str, captcha_url: str | None = None) -> Tup
         captcha_url: 验证码 URL（可选）
 
     Returns:
-        Tuple: (session, cas_login_url, execution_value, captcha_image_bytes, login_page_html)
+        Tuple: (session, cas_login_url, execution_value, captcha_image_bytes, captcha_token, login_page_html)
     """
-    session, cas_login_url, execution_value, captcha_image, login_page_html = _prepare_login_session_core(login_url, captcha_url)
+    session, cas_login_url, execution_value, captcha_image, captcha_token, login_page_html = _prepare_login_session_core(login_url, captcha_url)
     logger.info(f"验证码图片获取成功, 大小: {len(captcha_image)} bytes")
-    return session, cas_login_url, execution_value, captcha_image, login_page_html
+    return session, cas_login_url, execution_value, captcha_image, captcha_token, login_page_html
 
 
 def attempt_login_with_captcha(
@@ -460,7 +535,8 @@ def attempt_login_with_captcha(
     username: str,
     password: str,
     captcha_code: str,
-    login_page_html: str | None = None
+    login_page_html: str | None = None,
+    captcha_token: str = ""
 ) -> LoginResult:
     """使用指定的验证码尝试登录。
 
@@ -470,8 +546,9 @@ def attempt_login_with_captcha(
         execution_value: execution 参数值
         username: 用户名
         password: 密码
-        captcha_code: 验证码
+        captcha_code: 验证码（计算结果）
         login_page_html: 登录页面 HTML（可选，用于检测事件顺序）
+        captcha_token: 验证码挑战 token（与图片同源抓取，须成对提交，默认空串兜底）
 
     Returns:
         LoginResult: 登录结果
@@ -499,6 +576,8 @@ def attempt_login_with_captcha(
             "_eventId": evt,
             "geolocation": "",
             "validateCode": captcha_code,
+            "captchaToken": captcha_token,
+            "deviceFingerprint": "",
         }
 
         try:
@@ -552,7 +631,7 @@ def login_with_auto_captcha(
 
         try:
             # 准备登录会话
-            session, cas_login_url, execution_value, captcha_image, login_page_html = prepare_login_session(
+            session, cas_login_url, execution_value, captcha_image, captcha_token, login_page_html = prepare_login_session(
                 login_url, captcha_url
             )
 
@@ -562,7 +641,8 @@ def login_with_auto_captcha(
 
             # 尝试登录
             result = attempt_login_with_captcha(
-                session, cas_login_url, execution_value, username, password, captcha_code, login_page_html
+                session, cas_login_url, execution_value, username, password, captcha_code, login_page_html,
+                captcha_token=captcha_token
             )
 
             if result.success:
@@ -615,13 +695,14 @@ def login_with_manual_captcha(
     """
     try:
         # 准备登录会话
-        session, cas_login_url, execution_value, _, login_page_html = prepare_login_session(
+        session, cas_login_url, execution_value, _, captcha_token, login_page_html = prepare_login_session(
             login_url, captcha_url
         )
 
         # 使用手动输入的验证码登录
         result = attempt_login_with_captcha(
-            session, cas_login_url, execution_value, username, password, captcha_code, login_page_html
+            session, cas_login_url, execution_value, username, password, captcha_code, login_page_html,
+            captcha_token=captcha_token
         )
 
         return result

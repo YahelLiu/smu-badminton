@@ -74,20 +74,21 @@ async def get_captcha(req: CaptchaRequest):
         login_url = req.login_url or CAS_LOGIN_URL
         captcha_url = req.captcha_url or CAS_CAPTCHA_URL
 
-        session, cas_login_url, execution_value, captcha_image, login_page_html = await run_in_threadpool(
+        session, cas_login_url, execution_value, captcha_image, captcha_token, login_page_html = await run_in_threadpool(
             prepare_login_session, login_url, captcha_url
         )
 
         # 将验证码图片转为 base64
         captcha_base64 = base64.b64encode(captcha_image).decode('utf-8')
 
-        # 存储会话信息供后续登录使用
+        # 存储会话信息供后续登录使用（token 留服务端，前端只拿图片+session_id）
         session_id = str(uuid.uuid4())
         with _captcha_sessions_lock:
             _captcha_sessions[session_id] = {
                 "session": session,
                 "cas_login_url": cas_login_url,
                 "execution_value": execution_value,
+                "captcha_token": captcha_token,
                 "login_page_html": login_page_html,
                 "ts": _time.time()
             }
@@ -128,7 +129,7 @@ async def api_login(req: LoginRequest):
                 session_data = _captcha_sessions.get(req.session_id) if req.session_id else None
 
             if session_data:
-                # 使用已有的 session 和 execution
+                # 使用已有的 session 和 execution（token 与图片同源抓取，须成对提交）
                 result = await run_in_threadpool(
                     attempt_login_with_captcha,
                     session_data["session"],
@@ -137,7 +138,8 @@ async def api_login(req: LoginRequest):
                     req.username,
                     req.password,
                     req.captcha_code,
-                    session_data.get("login_page_html")
+                    session_data.get("login_page_html"),
+                    captcha_token=session_data.get("captcha_token", "")
                 )
             else:
                 # 没有缓存的 session，重新创建

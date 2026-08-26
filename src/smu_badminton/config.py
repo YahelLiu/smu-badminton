@@ -24,8 +24,10 @@ WF_SSO_AUTHORIZE_PATH = os.getenv("WF_SSO_AUTHORIZE_PATH", "/sso/oauth2/authoriz
 WF_CAPTCHA_URL = os.getenv("WF_CAPTCHA_URL", f"{WF_ORIGIN}/yy-sys/captcha")
 
 # CAS config
-CAS_ORIGIN = os.getenv("CAS_ORIGIN", "https://cas.shmtu.edu.cn")
-CAS_CAPTCHA_URL = os.getenv("CAS_CAPTCHA_URL", "https://cas.shmtu.edu.cn/cas/captcha")
+# 登录页已由 cas.shmtu.edu.cn 迁至 sso.shmtu.edu.cn；验证码 /cas/captcha 也随之迁到 sso.，
+# 且返回 JSON {image, token, expiresAt}（见 cas_login._fetch_captcha_challenge）。
+CAS_ORIGIN = os.getenv("CAS_ORIGIN", "https://sso.shmtu.edu.cn")
+CAS_CAPTCHA_URL = os.getenv("CAS_CAPTCHA_URL", "https://sso.shmtu.edu.cn/cas/captcha")
 # Backward compatibility: keep field name, but default entry is WF home now.
 CAS_LOGIN_URL = os.getenv("CAS_LOGIN_URL", WF_HOME_URL)
 

@@ -56,7 +56,7 @@ Copy `.env.example` to `.env` and configure:
 | `cas_login_requests.py` | Compat layer: HTTP retry logic, token cache, network time sync, re-exports from `cas_login` and `booking_api` |
 | `booking_api.py` | Resource queries, time slot queries, appointment creation, availability computation (parallel via ThreadPoolExecutor + shared Session) |
 | `cas_manager.py` | `BookingManager` singleton: job create/track/stop, DB persistence, scheduled/immediate booking orchestration |
-| `cas_ocr.py` | NCNN-based OCR using ResNet models for captcha solving |
+| `cas_ocr.py` | Arithmetic captcha OCR via ddddocr whole-image recognition (replaced deprecated NCNN ResNet pipeline after site font change) |
 | `core_utils.py` | Thread-safe SQLite `DatabasePool`, custom exceptions (`BookingError`, `DatabaseError`, `LoginError`, `ResourceLockedError`), error handling decorators (`handle_errors`, `db_operation`), password obfuscation |
 | `config.py` | Environment configuration from `.env` |
 
@@ -101,12 +101,14 @@ Two SQLite tables via `core_utils.DatabasePool`:
 
 Target time = `bookdate - 7 days + target_time_str`. E.g., booking for 2025-12-18 with target 21:00:00 means attempt at 2025-12-11 21:00:00.
 
-### OCR Models
+### OCR Models (deprecated)
 
-Located in `model/` directory (gitignored):
-- `resnet34_digit_latest.fp32.*` - Digit recognition
-- `resnet18_operator_latest.fp32.*` - Operator recognition (+, -, *)
-- `resnet18_equal_symbol_latest.fp32.*` - Equal symbol type detection (Chinese vs symbolic)
+`model/` directory (gitignored) previously held the NCNN ResNet triplet used by the old captcha
+pipeline (`resnet34_digit_*`, `resnet18_operator_*`, `resnet18_equal_symbol_*`). After the CAS site
+changed its captcha font these self-trained models could no longer recognize the operators/digits and
+could not be retrained (no training infra). Captcha recognition now uses **ddddocr** whole-image
+classification + regex parse (see `cas_ocr.py`); the NCNN models + `ncnn` dependency have been removed.
+The `model/` files may still exist on disk but are no longer loaded.
 
 ### API Endpoints
 
