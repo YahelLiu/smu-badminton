@@ -19,6 +19,7 @@ numpy==2.2.6
 
 # Utilities
 tqdm==4.67.1
+pycryptodome>=3.20.0  # captchaCode AES-128-CBC 加密(复现 SPA w()), 也兼容 cryptography 作回退
 
 # Testing
 pytest>=7.0

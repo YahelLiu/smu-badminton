@@ -21,6 +21,7 @@ WF_ORIGIN = os.getenv("WF_ORIGIN", "https://wf.shmtu.edu.cn")
 WF_API_URL = os.getenv("WF_API_URL", "https://wf.shmtu.edu.cn/bus/graphql/apps_yy_sys")
 WF_HOME_URL = os.getenv("WF_HOME_URL", f"{WF_ORIGIN}/yy-sys/pc/home")
 WF_SSO_AUTHORIZE_PATH = os.getenv("WF_SSO_AUTHORIZE_PATH", "/sso/oauth2/authorize")
+WF_CAPTCHA_URL = os.getenv("WF_CAPTCHA_URL", f"{WF_ORIGIN}/yy-sys/captcha")
 
 # CAS config
 CAS_ORIGIN = os.getenv("CAS_ORIGIN", "https://cas.shmtu.edu.cn")

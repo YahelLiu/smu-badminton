@@ -1,6 +1,6 @@
 import typing as t
 import threading
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Tuple, Optional
 from enum import Enum
 import time
 import uuid
@@ -14,7 +14,7 @@ from .booking_api import (
     make_appointment,
     list_appointments_for_account,
     check_resource_time_slot_capacity,
-    find_resource_detail,
+    solve_and_verify_slide_captcha,
 )
 from .http_utils import (
     get_network_time,
@@ -81,6 +81,21 @@ def get_token_cached(
 
 
 # ============= 任务状态机 =============
+
+def _get_slide_captcha(access_token: str) -> Tuple[str, str]:
+    """获取滑块验证码（如果需要）。
+
+    Returns:
+        (captcha_id, captcha_code) 元组
+    """
+    try:
+        result = solve_and_verify_slide_captcha(access_token)
+        if result:
+            return result
+    except Exception as e:
+        logger.error("滑块验证码处理异常: %s", e)
+    return "", ""
+
 
 class JobState(str, Enum):
     """任务状态枚举。
@@ -549,11 +564,16 @@ class BookingManager:
                 if not result:
                     self._safe_update_status(job_id, JobState.FAILED)
                     return
-                resource_id, time_id = result
+                resource_id, time_id, open_captcha_verify = result
                 if cancel_event.is_set():
                     self._safe_update_status(job_id, JobState.CANCELLED)
                     return
-                resp = make_appointment(access_token, time_id, resource_id, bookdate, kssj, jssj, id_token=id_token)
+                # 获取滑块验证码（如果需要）
+                captcha_id, captcha_code = "", ""
+                if open_captcha_verify == "1":
+                    logger.info("资源需要滑块验证码，自动处理")
+                    captcha_id, captcha_code = _get_slide_captcha(access_token)
+                resp = make_appointment(access_token, time_id, resource_id, bookdate, kssj, jssj, id_token=id_token, captcha_id=captcha_id, captcha_code=captcha_code)
                 # 根据预约结果更新状态
                 if resp and isinstance(resp, dict):
                     code = resp.get("code", "")
@@ -689,7 +709,7 @@ class BookingManager:
             if not result:
                 self._cleanup_job(job_id, JobState.FAILED, username=username, bookdate=bookdate, kssj=kssj, jssj=jssj, resources_name=resources_name)
                 return
-            resource_id, time_id = result
+            resource_id, time_id, open_captcha_verify = result
 
             # 更新状态为 running，表示正在抢票
             self._safe_update_status(job_id, JobState.RUNNING)
@@ -697,6 +717,9 @@ class BookingManager:
             barrier = threading.Barrier(num_threads)
             results_lock = threading.Lock()
             results: List[Dict[str, Any]] = []
+            need_captcha = open_captcha_verify == "1"
+            if need_captcha:
+                logger.info("资源需要滑块验证码，将在预约时自动处理")
 
             def worker(tid: int):
                 # 等待到目标时间
@@ -732,7 +755,15 @@ class BookingManager:
                         self._cleanup_job(job_id, JobState.FAILED, username=username, bookdate=bookdate, kssj=kssj, jssj=jssj, resources_name=resources_name)
                     return
 
-                resp = make_appointment(access_token, time_id, resource_id, bookdate, kssj, jssj, id_token=tokens.get("id_token", ""))
+                # 获取滑块验证码（如果需要）
+                captcha_id = ""
+                captcha_code = ""
+                if need_captcha:
+                    captcha_id, captcha_code = _get_slide_captcha(access_token)
+                    if not captcha_id:
+                        logger.warning("线程 %d 滑块验证码获取失败", tid)
+
+                resp = make_appointment(access_token, time_id, resource_id, bookdate, kssj, jssj, id_token=tokens.get("id_token", ""), captcha_id=captcha_id, captcha_code=captcha_code)
                 success = resp and isinstance(resp, dict) and resp.get("code") in ("success", "0")
                 with results_lock:
                     results.append({"thread": tid, "response": resp, "success": success})
@@ -826,17 +857,23 @@ def book_badminton_slot(
 
     result = fetch_resource_time_id(access_token, bookdate, resources_name, kssj, jssj, id_token=id_token)
     if not result:
+        logger.warning("fetch_resource_time_id 返回 None: bookdate=%s, resources_name=%s, kssj=%s, jssj=%s", bookdate, resources_name, kssj, jssj)
         _save_job_record(job_id, login_url, captcha_url, username, password, bookdate, kssj, jssj, resources_name, "", 1, "failed", created_at)
         return {"ok": False, "error": "resource_or_time_not_found"}
 
-    resource_id, time_id = result
+    resource_id, time_id, open_captcha_verify = result
+    logger.info("获取到资源: resource_id=%s, time_id=%s, open_captcha_verify=%s", resource_id[:20] if resource_id else "", time_id[:20] if time_id else "", open_captcha_verify)
 
-    # 即时预约前置校验：检查验证码要求 + 时段容量
-    resource_detail = find_resource_detail(access_token, resource_id, id_token=id_token)
-    if resource_detail and resource_detail.get("open_captcha_verify") == "1":
-        logger.warning("资源需要预约验证码，无法自动预约")
-        _save_job_record(job_id, login_url, captcha_url, username, password, bookdate, kssj, jssj, resources_name, "", 1, "failed", created_at)
-        return {"ok": False, "error": "captcha_verify_required"}
+    # 即时预约前置校验：时段容量 + 滑块验证码
+    captcha_id = ""
+    captcha_code = ""
+    if open_captcha_verify == "1":
+        logger.info("资源需要滑块验证码，自动处理")
+        captcha_id, captcha_code = _get_slide_captcha(access_token)
+        if not captcha_id:
+            logger.error("滑块验证码处理失败")
+            _save_job_record(job_id, login_url, captcha_url, username, password, bookdate, kssj, jssj, resources_name, "", 1, "failed", created_at)
+            return {"ok": False, "error": "captcha_verify_failed"}
 
     capacity_result = check_resource_time_slot_capacity(
         access_token, resource_id, [time_id], bookdate, kssj, jssj, id_token=id_token
@@ -846,14 +883,18 @@ def book_badminton_slot(
         _save_job_record(job_id, login_url, captcha_url, username, password, bookdate, kssj, jssj, resources_name, "", 1, "failed", created_at)
         return {"ok": False, "error": "capacity_check_failed", "detail": capacity_result}
 
-    resp_json = make_appointment(access_token, time_id, resource_id, bookdate, kssj, jssj, id_token=id_token)
+    resp_json = make_appointment(access_token, time_id, resource_id, bookdate, kssj, jssj, id_token=id_token, captcha_id=captcha_id, captcha_code=captcha_code)
 
     # 判断预约是否成功
+    logger.info("make_appointment 返回: %s", resp_json)
     if resp_json and isinstance(resp_json, dict):
         code = resp_json.get("code", "")
         status = "done" if (code == "success" or code == "0") else "failed"
+        if status == "failed":
+            logger.warning("预约失败: code=%s, messages=%s", code, resp_json.get("messages"))
     else:
         status = "failed"
+        logger.warning("make_appointment 返回无效响应: %s", resp_json)
 
     _save_job_record(job_id, login_url, captcha_url, username, password, bookdate, kssj, jssj, resources_name, "", 1, status, created_at)
 
@@ -937,7 +978,12 @@ def schedule_booking(
     result = fetch_resource_time_id(access_token, bookdate, resources_name, kssj, jssj, id_token=id_token)
     if not result:
         return {"ok": False, "error": "resource_or_time_not_found"}
-    resource_id, time_id = result
+    resource_id, time_id, open_captcha_verify = result
+
+    # 4) 检查是否需要滑块验证码
+    need_captcha = open_captcha_verify == "1"
+    if need_captcha:
+        logger.info("资源需要滑块验证码，将在预约时自动处理")
 
     barrier = threading.Barrier(num_threads)
     results: List[Dict[str, Any]] = []
@@ -963,7 +1009,16 @@ def schedule_booking(
 
         # synchronize all threads to fire together
         barrier.wait()
-        resp = make_appointment(access_token, time_id, resource_id, bookdate, kssj, jssj, id_token=id_token)
+
+        # 获取滑块验证码（如果需要）
+        captcha_id = ""
+        captcha_code = ""
+        if need_captcha:
+            captcha_id, captcha_code = _get_slide_captcha(access_token)
+            if not captcha_id:
+                logger.warning("线程 %d 滑块验证码获取失败", thread_id)
+
+        resp = make_appointment(access_token, time_id, resource_id, bookdate, kssj, jssj, id_token=id_token, captcha_id=captcha_id, captcha_code=captcha_code)
         with results_lock:
             results.append({"thread": thread_id, "response": resp})
 
