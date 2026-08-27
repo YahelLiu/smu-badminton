@@ -6,11 +6,15 @@
 
 ### CAS 认证配置
 
+> CAS 登录页已由 `cas.shmtu.edu.cn` 迁至 `sso.shmtu.edu.cn`，验证码接口 `/cas/captcha`
+> 也随之迁移并改为返回 JSON `{image, token, expiresAt}`。代码会按登录页 host 推导同源
+> 验证码 URL，`.env` 中残留旧 `cas.` 地址也不会跨 host 抓取失败。
+
 | 变量名 | 默认值 | 说明 |
 |--------|--------|------|
-| `CAS_ORIGIN` | `https://cas.shmtu.edu.cn` | CAS 认证平台地址 |
-| `CAS_CAPTCHA_URL` | `https://cas.shmtu.edu.cn/cas/captcha` | 验证码图片 URL |
-| `CAS_LOGIN_URL` | WF 首页地址 | CAS 登录页面 URL（默认通过 WF 首页发起） |
+| `CAS_ORIGIN` | `https://sso.shmtu.edu.cn` | CAS 认证平台地址 |
+| `CAS_CAPTCHA_URL` | `https://sso.shmtu.edu.cn/cas/captcha` | 验证码接口 URL（返回 JSON：image base64 + token） |
+| `CAS_LOGIN_URL` | WF 首页地址 | CAS 登录入口 URL（默认通过 WF 首页发起 OAuth2 授权再重定向到 CAS） |
 
 ### 微服务平台配置
 
@@ -33,16 +37,12 @@
 |--------|--------|------|
 | `BADMINTON_TYPE_ID` | `93c2a115-5c73-4e30-bb6a-dfcc5404e46f` | 羽毛球场地资源类型 ID |
 
-### OCR 验证码配置
+### 验证码识别
 
-| 变量名 | 默认值 | 说明 |
-|--------|--------|------|
-| `OCR_MODE` | `local` | OCR 模式：`local`（本地 NCNN）、`http`（远程 RESTful API）、`tcp`（远程 TCP API） |
-| `OCR_HTTP_HOST` | `127.0.0.1` | 远程 OCR HTTP 服务地址 |
-| `OCR_HTTP_PORT` | `21600` | 远程 OCR HTTP 服务端口 |
-| `OCR_TCP_HOST` | `127.0.0.1` | 远程 OCR TCP 服务地址 |
-| `OCR_TCP_PORT` | `21601` | 远程 OCR TCP 服务端口 |
-| `OCR_TIMEOUT` | `10` | 远程 OCR 请求超时（秒） |
+验证码 OCR 由 [ddddocr](https://github.com/sml2h3/ddddocr) 在本地整图识别完成，无需额外模型文件，
+也不存在 `OCR_MODE` / `OCR_HTTP_*` / `OCR_TCP_*` 等远程 OCR 配置（这些选项已随 NCNN 管线一并移除）。
+首次调用时 ddddocr 会惰性加载内置 onnx 模型，无需任何运行参数。若要改用手动输入验证码，
+前端直接传 `captcha_code` 即可，与配置无关。
 
 ### 安全配置
 
@@ -93,10 +93,10 @@
 ## .env.example 完整内容
 
 ```env
-# CAS 登录配置
-CAS_ORIGIN=https://cas.shmtu.edu.cn
-CAS_CAPTCHA_URL=https://cas.shmtu.edu.cn/cas/captcha
-CAS_LOGIN_URL=https://cas.shmtu.edu.cn/cas/login?service=...
+# CAS 登录配置（已迁移至 sso.shmtu.edu.cn）
+CAS_ORIGIN=https://sso.shmtu.edu.cn
+CAS_CAPTCHA_URL=https://sso.shmtu.edu.cn/cas/captcha
+CAS_LOGIN_URL=https://sso.shmtu.edu.cn/cas/login?service=...
 
 # 微服务平台配置
 WF_ORIGIN=https://wf.shmtu.edu.cn
@@ -107,14 +107,6 @@ OAUTH_CLIENT_ID=kwxKbMKq3Nafw2mApFZz
 
 # 羽毛球场地资源类型ID
 BADMINTON_TYPE_ID=93c2a115-5c73-4e30-bb6a-dfcc5404e46f
-
-# OCR 验证码识别配置
-OCR_MODE=local
-OCR_HTTP_HOST=127.0.0.1
-OCR_HTTP_PORT=21600
-OCR_TCP_HOST=127.0.0.1
-OCR_TCP_PORT=21601
-OCR_TIMEOUT=10
 ```
 
 ## 配置热更新

@@ -61,14 +61,20 @@ Token 缓存（默认 TTL 900 秒）
 - 缓存命中时直接返回，无需重新登录
 - 调用 `/api/logout` 可手动清除指定用户的 Token 缓存
 
-## 登录策略
+## 登录实现
 
-系统支持双登录策略，通过 `CAS_LOGIN_STABLE_FIRST` 环境变量控制优先级：
+登录采用单一稳定路径 `cas_login_stable`，不存在 `CAS_LOGIN_STABLE_FIRST` 之类的策略开关（早期文档提及的双策略 / 备选回退已不存在）。流程如下：
 
-- 策略一：通过 WF 首页发起 OAuth2 授权，再重定向到 CAS 登录
-- 策略二：直接访问 CAS 登录页面
+1. 解析 CAS 登录页 URL，获取登录页面 HTML
+2. 从页面提取 `execution` 令牌与事件顺序（`_stable_detect_event_order`）
+3. 抓取验证码图片与一次性 token（验证码接口现已返回 JSON `{image, token, expiresAt}`）
+4. OCR 识别或用户手输验证码后，提交用户名 + 密码 + 验证码 + execution
+5. 跟随重定向完成 OAuth2 授权，从回调 URL fragment 提取 `access_token` + `id_token`
 
-当首选策略失败时，系统会自动尝试备选策略，确保登录成功率。
+`login_with_retry` 在此基础上做 `max_retries × 3` 的整体重试。
+
+> CAS 登录页已由 `cas.shmtu.edu.cn` 迁至 `sso.shmtu.edu.cn`，代码按登录页 host 推导同源验证码
+> URL，无需手动维护两套地址，`.env` 中残留旧 `cas.` 地址也不会跨 host 抓取失败。
 
 ## 密码安全
 

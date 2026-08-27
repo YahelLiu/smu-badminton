@@ -25,7 +25,6 @@ from .config import (
     BADMINTON_TYPE_ID,
 )
 from .token_profile import (
-    cache_profile_from_tokens,
     get_profile_by_access_token,
     build_user_info_from_profile,
 )
@@ -472,47 +471,6 @@ def list_appointments_for_account(
         return []
 
 
-def compute_availability_for_date(
-    token: str,
-    bookdate: str,
-    id_token: str = ""
-) -> List[Dict[str, Any]]:
-    """
-    计算指定日期所有资源的可用性。使用共享 Session 复用连接，全并发请求。
-
-    Args:
-        token: 访问令牌
-        bookdate: 预约日期 (YYYY-MM-DD)
-        id_token: ID 令牌（可选）
-
-    Returns:
-        可用性列表
-    """
-    t0 = time.time()
-    session = _shared_session()
-
-    try:
-        # 阶段 1：并发获取资源列表 + 预约记录
-        t1 = time.time()
-        with ThreadPoolExecutor(max_workers=2) as init_executor:
-            resources_future = init_executor.submit(
-                list_resources_by_account, token, bookdate, id_token=id_token, session=session
-            )
-            appointments_future = init_executor.submit(
-                list_appointments_for_account, token, bookdate, id_token=id_token, session=session
-            )
-            resources = resources_future.result()
-            my_edges = appointments_future.result()
-        t2 = time.time()
-        logger.info("[性能] 获取资源列表+预约记录: %.0fms", (t2 - t1) * 1000)
-
-        my_map = _build_my_bookings_map(my_edges)
-        slots_data = _fetch_all_time_slots(token, bookdate, resources or [], id_token=id_token, session=session)
-        return _merge_bookings(slots_data, my_map, t0)
-    finally:
-        session.close()
-
-
 def _build_my_bookings_map(my_edges: List[Dict[str, Any]]) -> Dict[Tuple[str, str, str], bool]:
     """从预约记录构建 bookedByMe 映射。"""
     my_map: Dict[Tuple[str, str, str], bool] = {}
@@ -696,6 +654,8 @@ def fetch_resource_time_id(
     """
     获取资源和时间段 ID，以及验证码要求。
 
+    复用 list_resources_by_account 的查询与重试逻辑（含 token 过期自动刷新）。
+
     Args:
         token: 访问令牌
         bookdate: 预约日期 (YYYY-MM-DD)
@@ -707,46 +667,11 @@ def fetch_resource_time_id(
     Returns:
         (resource_id, time_id, open_captcha_verify) 元组，失败返回 None
     """
-    from .http_utils import requests_post_with_retry
-
-    headers = build_headers(token)
-    payload = {
-        "operationName": "findResourcesAllByAccount",
-        "variables": {
-            "typeId": BADMINTON_TYPE_ID,
-            "bookDate": bookdate,
-            "bookStartTime": "",
-            "bookEndTime": "",
-            "item_name": [],
-            "resourceName": "",
-            "account": "",
-            "cur_language": "zh",
-            "order_by": "",
-            "filter": {
-                "campus_code": {"eq": ""},
-                "building_code": {"eq": ""},
-                "floor_code": {"eq": ""},
-                "need_approve": {"eq": None}
-            }
-        },
-        "query": "query findResourcesAllByAccount($first: Int, $offset: Int, $typeId: String, $typeName: String, $resourceName: String, $bookDate: String, $bookStartTime: String, $bookEndTime: String, $item_name: [String], $is_cyclicity: String, $cyclicity_start_date: String, $cyclicity_end_date: String, $cyclicity_start_time: String, $cyclicity_end_time: String, $cyclicity_strategy: String, $cyclicity_weekList: [String], $cyclicity_dayList: [String], $order_by: String, $cur_language: String, $filter: ResourcesFilterMap) { findResourcesAllByAccount(first: $first, offset: $offset, typeId: $typeId, typeName: $typeName, resourceName: $resourceName, bookDate: $bookDate, bookStartTime: $bookStartTime, bookEndTime: $bookEndTime, item_name: $item_name, is_cyclicity: $is_cyclicity, cyclicity_start_date: $cyclicity_start_date, cyclicity_end_date: $cyclicity_end_date, cyclicity_start_time: $cyclicity_start_time, cyclicity_end_time: $cyclicity_end_time, cyclicity_strategy: $cyclicity_strategy, cyclicity_weekList: $cyclicity_weekList, cyclicity_dayList: $cyclicity_dayList, order_by: $order_by, cur_language: $cur_language, filter: $filter) { id resources_name open_captcha_verify capacity available_number resourcesTimeSlot { id kssj jssj } } }"
-    }
-    response = requests_post_with_retry(_graphql_url(id_token), json=payload, headers=headers)
-    if response is None or response.status_code != 200:
-        logger.warning("fetch_resource_time_id request failed, status=%d", response.status_code if response else 'None')
-        return None
-
-    try:
-        json_data = response.json()
-    except Exception as e:
-        logger.warning("fetch_resource_time_id parse error: %s", e)
-        return None
-
-    if 'data' not in json_data or 'findResourcesAllByAccount' not in json_data['data']:
+    resources = list_resources_by_account(token, bookdate, id_token=id_token)
+    if not resources:
         logger.warning("fetch_resource_time_id: 返回数据格式异常或无资源数据")
         return None
 
-    resources = json_data['data']['findResourcesAllByAccount']
     for resource in resources:
         if resource.get('resources_name') == resources_name:
             resource_id = resource.get('id')
@@ -768,7 +693,11 @@ def make_appointment(
     jssj: str,
     id_token: str = "",
     captcha_id: str = "",
-    captcha_code: str = ""
+    captcha_code: str = "",
+    user_info: Optional[Dict[str, Any]] = None,
+    session: Optional[requests.Session] = None,
+    allow_retry: bool = True,
+    timeout_seconds: int = 8,
 ) -> Dict[str, Any]:
     """
     执行预约。
@@ -782,7 +711,12 @@ def make_appointment(
         jssj: 结束时间 (HH:MM)
         id_token: ID 令牌（可选）
         captcha_id: 滑块验证码 ID（可选）
-        captcha_code: 滑块验证码校验码（可选）
+        captcha_code: 滑块验证码校验码（可选，一次性：提交一次即消费）
+        user_info: 预解析好的用户信息（可选；抢票关键路径应预取以省一次 RTT）
+        session: 复用的连接池 Session（可选；抢票路径应传预热过的 Session）
+        allow_retry: 是否允许请求级重试。预约接口有账号级频控（约 2 连发/窗口，
+            第 3 发封禁 3 分钟），抢票提交务必传 False 单发快断。
+        timeout_seconds: 请求超时秒数
 
     Returns:
         预约结果字典，包含 code 和 messages 字段
@@ -791,7 +725,7 @@ def make_appointment(
 
     _debug(f"appointment args date={bookdate}, start={kssj}, end={jssj}")
 
-    user_info = resolve_user_info(token, id_token=id_token)
+    user_info = user_info or resolve_user_info(token, id_token=id_token)
     if not user_info:
         return {
             "code": "USER_INFO_UNAVAILABLE",
@@ -882,9 +816,23 @@ def make_appointment(
     }
 
     _debug(f"saveAppointmentInformationAll payload timeSlotIdList={payload['variables']['timeSlotIdList']}")
-    response = requests_post_with_retry(_graphql_url(id_token), json=payload, headers=headers)
+
+    url = _graphql_url(id_token)
+    if allow_retry:
+        response = _make_graphql_request(
+            session or requests, url, headers, payload,
+            log_name="saveAppointmentInformationAll", token=token,
+        )
+    else:
+        # 单发不重试：重试会消耗账号的接口频控额度（第 3 发触发 3 分钟封禁）
+        try:
+            response = (session or requests).post(url, json=payload, headers=headers, timeout=timeout_seconds)
+        except Exception as e:
+            logger.warning("预约请求异常（单发不重试）: %s", e)
+            response = None
+
     if not response:
-        return {"code": "REQUEST_FAILED", "messages": ["Appointment request failed after retries"]}
+        return {"code": "REQUEST_FAILED", "messages": ["Appointment request failed"]}
 
     try:
         resp_json = response.json()
@@ -942,9 +890,6 @@ def _generate_track_list(slide_x: int, bg_width: int = 300, bg_height: int = 180
     Returns:
         trackList 数组，包含 down/move/up 事件
     """
-    import random
-    import math
-
     track_list = []
 
     # 边界检查
@@ -1098,7 +1043,6 @@ def check_slide_captcha(
     Returns:
         校验结果字典，成功时包含 captchaCode，失败返回 None
     """
-    from datetime import datetime, timezone, timedelta
     from .http_utils import requests_post_with_retry
 
     # 自动生成时间（使用 UTC 时间，带 Z 后缀）
@@ -1142,6 +1086,92 @@ def check_slide_captcha(
     except Exception as e:
         logger.error("校验滑块验证码异常: %s", e)
         return None
+
+
+# ============= 官方取消接口（2026-08-27 从 SPA 抓包还原）=============
+
+def find_my_appointment_id(
+    token: str,
+    bookdate: str,
+    kssj: str,
+    jssj: str,
+    resources_name: str = "",
+    id_token: str = ""
+) -> Optional[str]:
+    """
+    在本人有效预约中查找匹配的预约 ID。
+
+    Args:
+        token: 访问令牌
+        bookdate: 预约日期 (YYYY-MM-DD)
+        kssj: 开始时间 (HH:MM)
+        jssj: 结束时间 (HH:MM)
+        resources_name: 资源名称（空则仅按日期时段匹配）
+        id_token: ID 令牌（可选）
+
+    Returns:
+        预约 ID 字符串，未找到返回 None
+    """
+    edges = list_appointments_for_account(token, bookdate, id_token=id_token)
+    for e in edges:
+        n = e.get("node") or {}
+        if int(n.get("state") or 0) != 0:
+            continue
+        if n.get("start_time") != kssj or n.get("end_time") != jssj:
+            continue
+        if resources_name and n.get("resources_name") != resources_name:
+            continue
+        return str(n.get("id") or "") or None
+    return None
+
+
+def check_appointment_cancel_time(
+    token: str,
+    appointment_id: str,
+    id_token: str = ""
+) -> Tuple[bool, str]:
+    """查询该预约当前是否允许取消。返回 (allowed, message)。"""
+    from .http_utils import requests_post_with_retry
+
+    payload = {
+        "operationName": "checkAppointmentCancelTime",
+        "variables": {"id": appointment_id},
+        "query": "query checkAppointmentCancelTime($id: String) { checkAppointmentCancelTime(id: $id) { errcode msg msg_en } }",
+    }
+    try:
+        resp = requests_post_with_retry(_graphql_url(id_token), json=payload, headers=build_headers(token))
+        if not resp or resp.status_code != 200:
+            return False, "网络请求失败"
+        node = (resp.json().get("data") or {}).get("checkAppointmentCancelTime") or {}
+        return str(node.get("errcode", "")) == "0", node.get("msg", "")
+    except Exception as e:
+        logger.warning("checkAppointmentCancelTime 异常: %s", e)
+        return False, str(e)
+
+
+def update_appointment_state(
+    token: str,
+    appointment_id: str,
+    reason: str = "无",
+    id_token: str = "",
+) -> Tuple[bool, str]:
+    """撤销上游预约（state=1）。返回 (success, message)。"""
+    from .http_utils import requests_post_with_retry
+
+    payload = {
+        "operationName": "updateAppointmentInformationState",
+        "variables": {"id": appointment_id, "state": "1", "reason": reason, "dataSource": "1"},
+        "query": "mutation updateAppointmentInformationState($id: ID!, $state: String!, $reason: String, $dataSource: String) { updateAppointmentInformationState(id: $id, state: $state, reason: $reason, dataSource: $dataSource) { errcode msg msg_en } }",
+    }
+    try:
+        resp = requests_post_with_retry(_graphql_url(id_token), json=payload, headers=build_headers(token))
+        if not resp or resp.status_code != 200:
+            return False, "网络请求失败"
+        node = (resp.json().get("data") or {}).get("updateAppointmentInformationState") or {}
+        return str(node.get("errcode", "")) == "0", node.get("msg", "")
+    except Exception as e:
+        logger.warning("updateAppointmentState 异常: %s", e)
+        return False, str(e)
 
 
 # ============= captchaCode 加密（复现 SPA w() 函数）=============
@@ -1239,8 +1269,6 @@ def solve_and_verify_slide_captcha(token: str) -> Optional[Tuple[str, str]]:
     # 原始图片尺寸（如 600x360）和显示尺寸（如 300x180）
     bg_raw_width = captcha_info.get("backgroundImageWidth", 600)
     bg_raw_height = captcha_info.get("backgroundImageHeight", 360)
-    tpl_raw_width = captcha_info.get("templateImageWidth", 110)
-    tpl_raw_height = captcha_info.get("templateImageHeight", 360)
 
     # 显示尺寸 = 原始尺寸的一半（前端缩放比例）
     bg_display_width = bg_raw_width // 2

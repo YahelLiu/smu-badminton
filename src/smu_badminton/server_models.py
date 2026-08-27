@@ -6,17 +6,15 @@ import threading
 import uuid
 import time as _time
 import logging
-from typing import Dict, Tuple, Optional, List, Any
+from typing import Dict, Tuple, Optional
 
-from fastapi.middleware.cors import CORSMiddleware
-from fastapi.middleware.gzip import GZipMiddleware
 from starlette.middleware.base import BaseHTTPMiddleware
 from starlette.requests import Request
 from starlette.responses import Response
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field
 
-from .config import AUTHORIZED_USERS, RATE_LIMIT_MAX, RATE_LIMIT_WINDOW, RATE_LIMIT_JOBS_MAX, RATE_LIMIT_JOBS_WINDOW
+from .config import RATE_LIMIT_MAX, RATE_LIMIT_WINDOW, RATE_LIMIT_JOBS_MAX, RATE_LIMIT_JOBS_WINDOW
 
 logger = logging.getLogger(__name__)
 
@@ -87,6 +85,11 @@ class StopByParamsRequest(BaseModel):
     jssj: str = Field(..., pattern=r"^\d{2}:\d{2}$", description="结束时间")
     resources_name: str = Field(..., description="资源名称")
     current_username: str = Field(..., description="当前操作用户名，用于权限验证")
+    access_token: str = Field("", description="调用方 access_token（用于撤销学校侧预约，可选）")
+
+
+class RefreshRequest(BaseModel):
+    username: str = Field(..., description="用户名（凭服务端保存的账号静默重登换取新 token）")
 
 
 class StopJobRequest(BaseModel):
@@ -271,10 +274,6 @@ async def get_resource_lock(key: Tuple[str, str, str, str]) -> asyncio.Lock:
         return lock
 
 
-# 保持向后兼容的别名
-_acquire_lock = get_resource_lock
-
-
 def _get_tlock(key: Tuple[str, str, str, str]) -> threading.Lock:
     """获取或创建线程锁。"""
     with _tlocks_guard:
@@ -359,18 +358,16 @@ _avail_public_lock = asyncio.Lock()
 _avail_public_ttl_sec = 60.0
 
 
-# ============= 任务管理（内存级） =============
-
 __all__ = [
     # 模型
     "BookRequest", "BookResponse", "ScheduleRequest", "ScheduleResponse",
     "AvailabilityRequest", "AvailabilityResponse", "JobImmediateRequest", "JobScheduledRequest",
     "JobsListResponse", "LocalBookingRequest", "StopByParamsRequest", "StopJobRequest",
-    "UpdateConfigRequest", "LogoutRequest",
+    "UpdateConfigRequest", "LogoutRequest", "RefreshRequest",
     # 中间件
     "MetricsMiddleware", "RateLimitMiddleware",
     # 锁管理
-    "get_resource_lock", "_acquire_lock", "_get_tlock", "_locks_cleanup", "_locks", "_tlocks", "_locks_guard", "_tlocks_guard", "_lock_timestamps", "_LOCK_MAX_AGE_SEC",
+    "get_resource_lock", "_get_tlock", "_locks_cleanup", "_locks", "_tlocks", "_locks_guard", "_tlocks_guard", "_lock_timestamps", "_LOCK_MAX_AGE_SEC",
     # 任务管理
     "_new_job", "_set_job", "_append_log", "_jobs", "_jobs_guard",
     # 可用性缓存

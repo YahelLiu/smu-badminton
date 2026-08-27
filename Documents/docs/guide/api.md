@@ -177,6 +177,42 @@ SMU Badminton 提供 RESTful API，所有接口返回 JSON 格式数据。基础
 
 ---
 
+### POST /api/auth/refresh
+
+静默续期：用服务端保存的账号重新登录换取新 token。前端在 token 过期时优先调用此接口，
+成功后无需再次手动登录。
+
+**请求体：**
+
+```json
+{
+  "username": "202540510004"
+}
+```
+
+**响应（成功）：**
+
+```json
+{
+  "ok": true,
+  "data": {
+    "access_token": "eyJ..."
+  }
+}
+```
+
+**响应（失败，例如该账号从未在服务端登录过、无保存凭据）：**
+
+```json
+{
+  "ok": false,
+  "error": "刷新失败：未找到已保存的账号或登录失败",
+  "error_type": "refresh_failed"
+}
+```
+
+---
+
 ## 预约相关
 
 ### POST /api/availability
@@ -342,7 +378,14 @@ SMU Badminton 提供 RESTful API，所有接口返回 JSON 格式数据。基础
 
 ### GET /api/jobs
 
-列出所有预约任务。
+列出预约任务。`username` 参数可选：提供时仅返回该用户的任务（前端轮询使用），
+不提供时返回全部（任务监控页使用）。
+
+**查询参数：**
+
+| 参数 | 类型 | 必填 | 说明 |
+|------|------|------|------|
+| `username` | string | 否 | 按用户名过滤 |
 
 **响应：**
 
@@ -383,13 +426,18 @@ SMU Badminton 提供 RESTful API，所有接口返回 JSON 格式数据。基础
 
 ### POST /api/jobs/immediate
 
-创建即时预约任务（异步执行）。
+创建即时预约任务（异步执行），立即返回 `job_id`，结果通过任务轮询获取。
+前端「立即预订」默认使用此接口。
+
+与 [POST /api/book](#post-api-book) 共享同一套前置校验与本地占位记录：
+资源锁检查 -> 一天一约拦截 -> 写入本地占位；后台线程以 failed / skipped / cancelled
+终结时自动回滚占位记录。
 
 **请求体：**
 
 与 [POST /api/book](#post-api-book) 的请求体格式相同。
 
-**响应：**
+**响应（成功）：**
 
 ```json
 {
@@ -399,6 +447,16 @@ SMU Badminton 提供 RESTful API，所有接口返回 JSON 格式数据。基础
   }
 }
 ```
+
+**响应（前置校验失败示例）：**
+
+```json
+{
+  "ok": false,
+  "error": "您当天已有预约记录，每人每天只能预约一次"
+}
+```
+
 
 ---
 
@@ -505,9 +563,13 @@ SMU Badminton 提供 RESTful API，所有接口返回 JSON 格式数据。基础
   "kssj": "18:00",                       // 必填，开始时间
   "jssj": "19:00",                       // 必填，结束时间
   "resources_name": "羽毛球13号场地",      // 必填，资源名称
-  "current_username": "202540510004"      // 必填，当前操作用户名
+  "current_username": "202540510004",     // 必填，当前操作用户名
+  "access_token": ""                      // 可选，用于撤销学校侧预约
 }
 ```
+
+除停止本地排队任务外，接口还会尽力撤销学校侧已生效的预约（凭据优先级：
+`access_token` > 服务端保存的账号静默重登）。详见[取消预约](./booking.md#取消预约真实撤销学校侧)。
 
 **响应：**
 
@@ -515,10 +577,19 @@ SMU Badminton 提供 RESTful API，所有接口返回 JSON 格式数据。基础
 {
   "ok": true,
   "data": {
-    "stopped": 2
+    "stopped": 2,
+    "upstream_status": "cancelled",
+    "message": "学校侧预约已撤销"
   }
 }
 ```
+
+| upstream_status | 含义 |
+|-----------------|------|
+| `cancelled` | 学校侧预约已成功撤销 |
+| `none` | 学校侧没有匹配时段的有效预约 |
+| `skipped` | 无可用凭据，仅取消了本地排队 |
+| `failed` | 上游拒绝或异常，见 message |
 
 ---
 
@@ -562,7 +633,6 @@ SMU Badminton 提供 RESTful API，所有接口返回 JSON 格式数据。基础
 | `limit` | int | 否 | 返回记录数量限制 |
 | `offset` | int | 否 | 偏移量，默认 0 |
 | `fields` | string | 否 | 返回字段过滤，逗号分隔（如 `username,bookdate`） |
-| `clean` | int | 否 | 是否清理过期记录，默认 1 |
 
 **响应：**
 
@@ -588,14 +658,10 @@ SMU Badminton 提供 RESTful API，所有接口返回 JSON 格式数据。基础
 
 | Header | 说明 |
 |--------|------|
-| `X-LBookings-CleanMs` | 清理过期记录耗时（毫秒） |
-| `X-LBookings-QueryMs` | 查询耗时（毫秒） |
 | `X-LBookings-Count` | 返回记录数量 |
-| `X-LBookings-Limit` | 限制数量（-1 表示无限制） |
-| `X-LBookings-Offset` | 偏移量 |
 
 **说明：**
-- `clean=1`（默认）时，会自动清理已过期（结束时间早于当前时间）的预约记录
+- 过期记录由后台任务周期性清理（`server_fastapi._stale_local_bookings_cleanup`），请求路径不再做全表扫描，故无 `clean` 参数
 - `fields` 参数支持过滤返回字段，可选值：`username`, `bookdate`, `resources_name`, `kssj`, `jssj`, `created_at`
 
 ---
@@ -614,7 +680,7 @@ SMU Badminton 提供 RESTful API，所有接口返回 JSON 格式数据。基础
   "data": {
     "login_url": "https://wf.shmtu.edu.cn/yy-sys/pc/home",
     "authorize_url": "https://wf.shmtu.edu.cn/sso/oauth2/authorize?...",
-    "captcha_url": "https://cas.shmtu.edu.cn/cas/captcha"
+    "captcha_url": "https://sso.shmtu.edu.cn/cas/captcha"
   }
 }
 ```
@@ -629,7 +695,7 @@ SMU Badminton 提供 RESTful API，所有接口返回 JSON 格式数据。基础
 
 ```json
 {
-  "login_url": "https://cas.shmtu.edu.cn/cas/login?service=...",   // 必填，新的 CAS 登录 URL
+  "login_url": "https://sso.shmtu.edu.cn/cas/login?service=...",   // 必填，新的 CAS 登录 URL
   "current_username": "202540510004"                                 // 必填，当前操作用户名
 }
 ```

@@ -1,32 +1,53 @@
-/* Jobs 页面样式 - 复用主页变量，添加 jobs 特有样式 */
+/* Jobs 页面样式 - 与主页设计系统保持一致 */
+/* 字号仅允许使用 main.css 的 --fs-* token；
+   唯一例外：监控卡片的大数字，本文件顶部局部声明 */
 
-/* 统计卡片 */
+:root {
+    --fs-display: 44px;    /* 监控卡片 hero 数字 */
+    --fs-display-lg: 32px;
+}
+/* ============================================================
+   Stats Cards
+   ============================================================ */
 .stats {
     display: grid;
-    grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
-    gap: 20px;
-    margin-bottom: 32px;
+    grid-template-columns: repeat(4, 1fr);
+    gap: 16px;
+    margin-bottom: 28px;
 }
 
 .stat-card {
     background: var(--bg-secondary);
-    padding: 24px;
+    padding: 20px;
     border-radius: var(--radius);
-    box-shadow: var(--shadow-md);
+    box-shadow: var(--shadow-sm);
     border: 1px solid var(--border);
     display: flex;
     flex-direction: column;
     gap: 8px;
     transition: all var(--transition);
+    position: relative;
+    overflow: hidden;
+}
+
+.stat-card::before {
+    content: '';
+    position: absolute;
+    top: 0;
+    left: 0;
+    right: 0;
+    height: 3px;
+    background: var(--text-muted);
+    opacity: 0.3;
 }
 
 .stat-card:hover {
-    box-shadow: var(--shadow-lg);
+    box-shadow: var(--shadow-md);
     transform: translateY(-2px);
 }
 
 .stat-value {
-    font-size: 36px;
+    font-size: var(--fs-display-lg);
     font-weight: 800;
     color: var(--text-primary);
     line-height: 1;
@@ -34,28 +55,29 @@
 }
 
 .stat-label {
-    font-size: 14px;
+    font-size: var(--fs-sm);
     font-weight: 600;
     color: var(--text-secondary);
-    text-transform: uppercase;
     letter-spacing: 0.5px;
 }
 
-/* 统计卡片主题色边框提示 */
-.stat-card.warning { border-bottom: 3px solid var(--warning); }
+.stat-card.warning::before { background: var(--warning); opacity: 1; }
 .stat-card.warning .stat-value { color: var(--warning); }
 
-.stat-card.success { border-bottom: 3px solid var(--primary); }
+.stat-card.success::before { background: var(--primary); opacity: 1; }
 .stat-card.success .stat-value { color: var(--primary); }
 
-.stat-card.danger { border-bottom: 3px solid var(--danger); }
+.stat-card.danger::before { background: var(--danger); opacity: 1; }
 .stat-card.danger .stat-value { color: var(--danger); }
 
-/* 主内容区 */
+/* ============================================================
+   Main Content
+   ============================================================ */
 .main-content {
     background: var(--bg-secondary);
-    border-radius: var(--radius);
-    box-shadow: 0 1px 3px var(--shadow);
+    border-radius: var(--radius-lg);
+    box-shadow: var(--shadow-md);
+    border: 1px solid var(--border);
     overflow: hidden;
 }
 
@@ -64,18 +86,34 @@
     justify-content: space-between;
     align-items: center;
     padding: 16px 20px;
+    background: var(--bg-primary);
     border-bottom: 1px solid var(--border);
 }
 
 .content-title {
-    font-size: 16px;
-    font-weight: 600;
+    font-size: var(--fs-lg);
+    font-weight: 700;
+    color: var(--text-primary);
+    letter-spacing: -0.2px;
 }
 
-/* 表格样式 */
+/* ============================================================
+   Table
+   ============================================================ */
 .table-container {
     overflow-x: auto;
-    border-top: 1px solid var(--border);
+    background: var(--bg-secondary);
+    scrollbar-width: thin;
+    scrollbar-color: var(--border) transparent;
+}
+
+.table-container::-webkit-scrollbar {
+    height: 8px;
+}
+
+.table-container::-webkit-scrollbar-thumb {
+    background: var(--border);
+    border-radius: 4px;
 }
 
 .jobs-table {
@@ -83,26 +121,28 @@
     border-collapse: separate;
     border-spacing: 0;
     text-align: left;
-    font-size: 14px;
+    font-size: var(--fs-base);
 }
 
 .jobs-table th {
-    background-color: var(--bg-hover);
+    background: var(--bg-primary);
     color: var(--text-secondary);
-    font-weight: 600;
-    padding: 16px;
-    border-bottom: 2px solid var(--border-focus);
+    font-weight: 700;
+    padding: 14px 16px;
+    border-bottom: 1px solid var(--border);
     white-space: nowrap;
-    letter-spacing: 0.5px;
+    letter-spacing: 0.3px;
     position: sticky;
     top: 0;
     z-index: 10;
+    font-size: var(--fs-xs);
+    text-transform: uppercase;
 }
 
 .jobs-table td {
-    padding: 16px;
+    padding: 14px 16px;
     color: var(--text-primary);
-    border-bottom: 1px solid var(--border);
+    border-bottom: 1px solid var(--grid-line);
     font-variant-numeric: tabular-nums;
     vertical-align: middle;
 }
@@ -115,99 +155,117 @@
     transition: background var(--transition);
 }
 
-.jobs-table tr:hover td {
+.jobs-table tbody tr:hover {
     background-color: var(--bg-hover);
 }
 
-/* Job ID 标签样式 */
+/* ============================================================
+   Job ID
+   ============================================================ */
 .job-id {
     font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
-    font-size: 13px;
+    font-size: var(--fs-xs);
     color: var(--text-primary);
     background: var(--bg-primary);
     padding: 4px 8px;
-    border-radius: 6px;
+    border-radius: var(--radius-xs);
     border: 1px solid var(--border);
     letter-spacing: 0.5px;
 }
 
-/* 状态徽章 */
+/* ============================================================
+   Status Badges
+   ============================================================ */
 .status-badge {
     display: inline-flex;
     align-items: center;
     gap: 6px;
-    padding: 4px 11px;
+    padding: 4px 10px;
     border-radius: 9999px;
-    font-size: 12px;
+    font-size: var(--fs-xs);
     font-weight: 600;
     line-height: 1.4;
     letter-spacing: 0.2px;
-    box-shadow: 0 1px 2px rgba(0, 0, 0, 0.05);
     border: 1px solid var(--border);
+    background: var(--bg-primary);
+    color: var(--text-secondary);
+}
+
+.status-badge::before {
+    content: '';
+    width: 7px;
+    height: 7px;
+    border-radius: 50%;
+    background: currentColor;
 }
 
 .status-badge.running {
-    background-color: rgba(37, 99, 235, 0.14);
-    color: #1d4ed8;
-    border-color: rgba(37, 99, 235, 0.28);
-    font-weight: 600;
+    background: var(--primary-light);
+    color: var(--primary);
+    border-color: var(--primary-ring);
 }
+
 .status-badge.running::before {
-    content: '';
-    width: 8px;
-    height: 8px;
-    background: #1d4ed8;
-    border-radius: 50%;
     animation: pulse 2s infinite;
 }
 
 .status-badge.done {
-    background-color: rgba(16, 185, 129, 0.14);
-    color: #047857;
-    border-color: rgba(16, 185, 129, 0.28);
-    font-weight: 600;
+    background: var(--success-bg);
+    color: var(--success);
+    border-color: rgba(16, 185, 129, 0.25);
 }
-.status-badge.done::before { content: ''; width: 8px; height: 8px; background: #047857; border-radius: 50%; }
 
 .status-badge.failed {
-    background-color: rgba(239, 68, 68, 0.14);
-    color: #b91c1c;
-    border-color: rgba(239, 68, 68, 0.28);
-    font-weight: 700;
+    background: var(--danger-bg);
+    color: var(--danger);
+    border-color: rgba(239, 68, 68, 0.25);
 }
-.status-badge.failed::before { content: ''; width: 8px; height: 8px; background: #b91c1c; border-radius: 50%; }
 
 .status-badge.scheduled {
-    background-color: rgba(245, 158, 11, 0.14);
-    color: #b45309;
-    border-color: rgba(245, 158, 11, 0.28);
-    font-weight: 500;
-}
-.status-badge.scheduled::before { content: ''; width: 8px; height: 8px; background: #b45309; border-radius: 50%; }
-
-@keyframes pulse {
-    0%, 100% { opacity: 1; }
-    50% { opacity: 0.4; }
+    background: var(--warning-bg);
+    color: var(--warning);
+    border-color: rgba(245, 158, 11, 0.25);
 }
 
-/* 参数展示 */
+.status-badge.cancelled {
+    background: var(--bg-tertiary);
+    color: var(--text-muted);
+}
+
+.status-badge.skipped {
+    background: var(--others-bg);
+    color: var(--others);
+    border-color: rgba(139, 92, 246, 0.25);
+}
+
+/* ============================================================
+   Params
+   ============================================================ */
 .params-preview {
-    max-width: 300px;
+    max-width: 280px;
 }
 
 .params-btn {
     color: var(--primary);
-    background: none;
-    border: none;
+    background: var(--primary-light);
+    border: 1px solid var(--primary-ring);
     cursor: pointer;
-    font-size: 13px;
-    text-decoration: underline;
+    font-size: var(--fs-xs);
+    font-weight: 600;
+    padding: 5px 10px;
+    border-radius: var(--radius-xs);
+    transition: all var(--transition);
+}
+
+.params-btn:hover {
+    background: var(--primary);
+    color: #fff;
 }
 
 .params-panel {
     display: flex;
     flex-direction: column;
-    gap: 10px;
+    gap: 12px;
 }
 
 .params-summary {
@@ -219,99 +277,141 @@
 .params-card {
     padding: 14px 16px;
     border: 1px solid var(--border);
-    border-radius: 10px;
-    background: linear-gradient(180deg, var(--bg-secondary) 0%, var(--bg-primary) 100%);
+    border-radius: var(--radius-sm);
+    background: var(--bg-primary);
+    transition: all var(--transition);
+}
+
+.params-card:hover {
+    border-color: var(--border-focus);
+    background: var(--bg-secondary);
 }
 
 .params-label {
-    font-size: 12px;
-    color: var(--text-secondary);
+    font-size: var(--fs-xs);
+    color: var(--text-muted);
     margin-bottom: 6px;
     text-transform: uppercase;
-    letter-spacing: 0.4px;
+    letter-spacing: 0.5px;
+    font-weight: 700;
 }
 
 .params-value {
-    font-size: 14px;
+    font-size: var(--fs-base);
     font-weight: 600;
     color: var(--text-primary);
     word-break: break-word;
 }
 
-/* Jobs 页面特有按钮样式 */
+/* ============================================================
+   Buttons & Links
+   ============================================================ */
 .back-link {
     display: inline-flex;
     align-items: center;
     gap: 6px;
     color: var(--text-secondary);
     text-decoration: none;
-    font-size: 14px;
-    font-weight: 500;
-    padding: 8px 12px;
+    font-size: var(--fs-sm);
+    font-weight: 600;
+    padding: 7px 12px;
     border-radius: var(--radius-btn);
-    transition: background var(--transition), color var(--transition);
+    background: var(--bg-primary);
+    border: 1px solid var(--border);
+    transition: all var(--transition);
 }
 
 .back-link:hover {
-    background: var(--bg-hover);
-    color: var(--text-primary);
+    background: var(--primary-light);
+    border-color: var(--primary-ring);
+    color: var(--primary);
 }
 
 .btn-sm {
-    padding: 8px 14px;
-    font-size: 13px;
-    border-radius: 6px;
+    padding: 6px 12px;
+    font-size: var(--fs-xs);
+    border-radius: var(--radius-xs);
+    height: 30px;
 }
 
-/* 空状态 */
+/* ============================================================
+   Empty State
+   ============================================================ */
 .empty-state {
     text-align: center;
-    padding: 60px 20px;
+    padding: 56px 20px;
     color: var(--text-secondary);
 }
 
 .empty-icon {
-    font-size: 48px;
-    margin-bottom: 16px;
+    font-size: var(--fs-display);
+    margin-bottom: 14px;
+    opacity: 0.8;
 }
 
 .empty-text {
-    font-size: 16px;
-    margin-bottom: 8px;
+    font-size: var(--fs-lg);
+    font-weight: 600;
+    margin-bottom: 6px;
+    color: var(--text-primary);
 }
 
 .empty-subtext {
-    font-size: 14px;
-    opacity: 0.7;
+    font-size: var(--fs-sm);
+    opacity: 0.8;
 }
 
-/* 参数弹窗宽度 */
+/* ============================================================
+   Dialog Overrides
+   ============================================================ */
 #params-dialog {
     max-width: min(860px, 92vw);
 }
 
-/* 配置弹窗样式 */
 #current-login-url {
-    padding: 12px !important;
-    background: var(--bg-primary) !important;
-    border-radius: 6px !important;
-    font-size: 12px !important;
-    word-break: break-all !important;
-    max-height: 120px !important;
-    overflow-y: auto !important;
-    font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace !important;
+    padding: 12px;
+    background: var(--bg-primary);
+    border-radius: var(--radius-sm);
+    font-size: var(--fs-xs);
+    word-break: break-all;
+    max-height: 120px;
+    overflow-y: auto;
+    font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+    border: 1px solid var(--border);
+    color: var(--text-secondary);
 }
 
 #new-login-url {
-    min-height: 100px !important;
-    font-size: 13px !important;
-    font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace !important;
-    resize: vertical !important;
+    min-height: 100px;
+    font-size: var(--fs-sm);
+    font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+    resize: vertical;
 }
 
-/* 响应式 */
+/* ============================================================
+   Responsive
+   ============================================================ */
 @media (max-width: 768px) {
-    .stats { grid-template-columns: repeat(2, 1fr); }
-    .jobs-table th, .jobs-table td { padding: 10px 12px; font-size: 13px; }
-    .params-summary { grid-template-columns: 1fr; }
+    .stats {
+        grid-template-columns: repeat(2, 1fr);
+        gap: 12px;
+    }
+
+    .stat-card {
+        padding: 16px;
+    }
+
+    .stat-value {
+        font-size: var(--fs-display-lg);
+    }
+
+    .jobs-table th,
+    .jobs-table td {
+        padding: 10px 12px;
+        font-size: var(--fs-sm);
+    }
+
+    .params-summary {
+        grid-template-columns: 1fr;
+    }
 }

@@ -4,7 +4,7 @@
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>SMU Badminton - Booking</title>
-    <link rel="stylesheet" href="/static/css/main.css">
+    <link rel="stylesheet" href="/static/css/main.css?v=20260827g">
 </head>
 <body>
     <!-- Toast 容器 -->
@@ -15,18 +15,12 @@
         <header class="header">
             <!-- 标题行 -->
             <div class="header-row header-title-row">
-                <span class="logo">SMU 羽毛球预约</span>
+                <span class="logo"><span class="logo-icon">🏸</span>SMU 羽毛球预约</span>
                 <div class="header-right">
                     <div class="header-actions">
-                        <div class="form-group" style="margin: 0; background: transparent; border: none; padding: 0;">
-                            <span id="current-username" class="user-badge">Not logged in</span>
-                        </div>
-                        <button class="btn btn-outline" id="logoutBtn" style="height: 38px;">
-                            退出登录
-                        </button>
-                        <button class="btn btn-icon btn-outline" id="themeBtn" title="切换主题">
-                            🌙
-                        </button>
+                        <span id="current-username" class="user-badge">未登录</span>
+                        <button class="btn btn-outline" id="logoutBtn">退出登录</button>
+                        <button class="btn btn-icon btn-outline" id="themeBtn" title="切换主题" aria-label="切换主题">🌙</button>
                     </div>
                 </div>
             </div>
@@ -39,20 +33,22 @@
                         <input type="date" id="date" class="form-input">
                     </div>
 
-                    <div class="switch-wrapper">
-                        <span class="form-label">21:00 抢票模式</span>
-                        <div class="switch active" id="modeSwitch" title="点击切换模式"></div>
+                    <div class="form-group">
+                        <div class="mode-toggle active" id="modeSwitch" title="点击切换模式">
+                            <span id="modeLabel">21:00 自动抢</span>
+                            <span class="mode-knob"><i></i></span>
+                        </div>
                     </div>
 
-                    <button class="btn btn-outline" id="refreshBtn" title="刷新数据" style="border-color: var(--primary); color: var(--primary);">
-                        🔄 刷新
+                    <button class="btn btn-outline" id="refreshBtn" title="刷新数据">
+                        <span aria-hidden="true">↻</span> 刷新
                     </button>
                 </div>
 
                 <!-- 场地地图 (改为悬浮气泡) -->
                 <div class="court-map-wrapper">
                     <div class="court-map-toggle">
-                        <span>🗺️</span> 场地分布图
+                        <span aria-hidden="true">⊞</span> 场地分布图
                     </div>
                     <div class="court-map">
                         <div class="court-map-title">场地分布平面图</div>
@@ -103,6 +99,14 @@
                     <span class="legend-dot others"></span>
                     <span>他人排队中</span>
                 </div>
+                <div class="legend-item">
+                    <span class="legend-dot pending"></span>
+                    <span>我的提交中</span>
+                </div>
+                <div class="legend-item">
+                    <span class="legend-dot past"></span>
+                    <span>已过时段</span>
+                </div>
                 <div class="legend-status">
                     <div class="status-item">
                         <span class="status-dot"></span>
@@ -125,18 +129,18 @@
                     <thead>
                         <tr>
                             <th>场地</th>
-                            <th>09-10</th>
-                            <th>10-11</th>
-                            <th>11-12</th>
-                            <th>12-13</th>
-                            <th>13-14</th>
-                            <th>14-15</th>
-                            <th>15-16</th>
-                            <th>16-17</th>
-                            <th>17-18</th>
-                            <th>18-19</th>
-                            <th>19-20</th>
-                            <th>20-21</th>
+                            <th data-hour="9">09-10</th>
+                            <th data-hour="10">10-11</th>
+                            <th data-hour="11">11-12</th>
+                            <th data-hour="12">12-13</th>
+                            <th data-hour="13">13-14</th>
+                            <th data-hour="14">14-15</th>
+                            <th data-hour="15">15-16</th>
+                            <th data-hour="16">16-17</th>
+                            <th data-hour="17">17-18</th>
+                            <th data-hour="18">18-19</th>
+                            <th data-hour="19">19-20</th>
+                            <th data-hour="20">20-21</th>
                         </tr>
                     </thead>
                     <tbody id="schedule-tbody"></tbody>
@@ -163,7 +167,7 @@
     <!-- 登录弹窗 -->
     <dialog id="login-dialog">
         <div class="dialog-header">
-            <h3 class="dialog-title" id="login-dialog-title">🔐 登录</h3>
+            <h3 class="dialog-title" id="login-dialog-title">登录</h3>
         </div>
         <form id="login-form">
             <div class="dialog-body">
@@ -199,6 +203,6 @@
         </form>
     </dialog>
 
-    <script src="/static/js/main.js?v=20260528"></script>
+    <script src="/static/js/main.js?v=20260827g"></script>
 </body>
 </html>

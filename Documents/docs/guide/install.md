@@ -11,8 +11,8 @@
 
 ```bash
 # 克隆项目
-git clone https://github.com/a645162/shmtu-terminal.git
-cd shmtu-terminal/Server/smu-badminton
+git clone https://github.com/YahelLiu/smu-badminton.git
+cd smu-badminton
 
 # 可编辑模式安装（推荐开发使用）
 pip install -e .
@@ -21,10 +21,16 @@ pip install -e .
 pip install -e ".[dev]"
 ```
 
+> 若使用 [uv](https://github.com/astral-sh/uv) 管理环境，用 `uv sync` 同步运行依赖，
+> `uv sync --extra dev` 同步含测试依赖。
+>
+> ddddocr 在部分国内镜像源（如清华 tuna）可能未收录，安装失败时改用官方源：
+> `pip install ddddocr -i https://pypi.org/simple`
+
 ### 启动开发服务器
 
 ```bash
-# 默认端口 5002，自动重载
+# 默认端口 5002
 python -m smu_badminton.server_fastapi
 
 # 自定义端口
@@ -32,6 +38,9 @@ SERVER_PORT=8080 python -m smu_badminton.server_fastapi
 
 # 调试模式
 BOOKING_DEBUG=1 python -m smu_badminton.server_fastapi
+
+# 自动重载（开发用）
+UVICORN_RELOAD=1 python -m smu_badminton.server_fastapi
 ```
 
 ## Docker 部署（生产环境）
@@ -59,8 +68,6 @@ services:
     volumes:
       # 数据库持久化（Docker volume）
       - smu-badminton-data:/app/data
-      # OCR 模型文件（较大，不打包进镜像，只读挂载）
-      - ./model:/app/model:ro
       # 环境变量配置
       - ./.env:/app/.env:ro
     environment:
@@ -88,7 +95,6 @@ docker build -t smu-badminton .
 docker run -d \
   --name smu-badminton \
   -p 5000:5000 \
-  -v ./model:/app/model:ro \
   -v ./data:/app/data \
   -v ./.env:/app/.env:ro \
   -e TZ=Asia/Shanghai \
@@ -126,22 +132,6 @@ Dockerfile 基于 `python:3.11-slim`，安装了以下系统级依赖：
 - **本地开发**：项目根目录下的 `data/` 目录
 
 SQLite 以 WAL（Write-Ahead Logging）模式运行，支持并发读写。
-
-### OCR 模型
-
-模型文件存放在 `model/` 目录，通过 Docker volume 只读挂载到容器内：
-
-```
-model/
-  resnet34_digit_latest.fp32.param    # 数字识别模型参数
-  resnet34_digit_latest.fp32.bin      # 数字识别模型权重
-  resnet18_operator_latest.fp32.param # 运算符识别模型参数
-  resnet18_operator_latest.fp32.bin   # 运算符识别模型权重
-  resnet18_equal_symbol_latest.fp32.param  # 等号类型检测模型参数
-  resnet18_equal_symbol_latest.fp32.bin    # 等号类型检测模型权重
-```
-
-> 模型文件体积较大且被 gitignore，需要单独获取并放置。
 
 ## 运行测试
 

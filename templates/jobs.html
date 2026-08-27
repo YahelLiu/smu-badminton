@@ -15,13 +15,15 @@
         <!-- 头部 -->
         <header class="header">
             <div class="header-left">
-                <span class="logo">SMU 羽毛球任务</span>
-                <a href="/" class="back-link">← 返回预约页面</a>
+                <span class="logo"><span class="logo-icon">🏸</span>SMU 羽毛球任务</span>
+                <a href="/" class="back-link"><span aria-hidden="true">←</span> 返回预约页面</a>
             </div>
             <div class="header-right">
-                <button class="btn btn-outline" id="configBtn">⚙️ 配置</button>
-                <button class="btn btn-outline" id="refreshBtn">🔄 刷新</button>
-                <button class="btn btn-icon btn-outline" id="themeBtn" title="切换主题">🌙</button>
+                <button class="btn btn-outline" id="configBtn">配置</button>
+                <button class="btn btn-outline" id="refreshBtn">
+                    <span aria-hidden="true">↻</span> 刷新
+                </button>
+                <button class="btn btn-icon btn-outline" id="themeBtn" title="切换主题" aria-label="切换主题">🌙</button>
             </div>
         </header>
 
@@ -80,7 +82,7 @@
     <!-- 参数详情弹窗 -->
     <dialog id="params-dialog">
         <div class="dialog-header">
-            <h3 class="dialog-title">📄 任务参数</h3>
+            <h3 class="dialog-title">任务参数</h3>
         </div>
         <div class="dialog-body">
             <div class="params-panel">
@@ -95,7 +97,7 @@
     <!-- 配置弹窗 -->
     <dialog id="config-dialog">
         <div class="dialog-header">
-            <h3 class="dialog-title">⚙️ 系统配置</h3>
+            <h3 class="dialog-title">系统配置</h3>
         </div>
         <div class="dialog-body">
             <div style="display: flex; flex-direction: column; gap: 20px;">
@@ -125,7 +127,7 @@
     <!-- 登录弹窗 -->
     <dialog id="login-dialog">
         <div class="dialog-header">
-            <h3 class="dialog-title">🔐 登录验证</h3>
+            <h3 class="dialog-title">登录验证</h3>
         </div>
         <form id="login-form">
             <div class="dialog-body">
@@ -150,6 +152,6 @@
         </form>
     </dialog>
 
-    <script src="/static/js/jobs.js"></script>
+    <script src="/static/js/jobs.js?v=20260827d"></script>
 </body>
 </html>

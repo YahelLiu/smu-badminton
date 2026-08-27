@@ -81,7 +81,6 @@ async function loadConfig() {
             window.login_url = json.data.login_url || '';
             window.captcha_url = json.data.captcha_url || '';
             window._configLoaded = true;
-            console.log('配置加载成功');
         }
     } catch (e) {
         console.error('加载配置失败:', e);
@@ -115,13 +114,27 @@ const Auth = {
     }
 };
 
+// ============ 全局配置 ============
+// 学校固定放号时间（21:00 放第 7 天的场地）。若学校调整放票时间，改这一处即可。
+const RUSH_TIME = '21:00';
+
+// 开关文案随模式切换（开=到点自动抢 / 关=点了立刻约），一眼可辨
+function syncModeLabel() {
+    if (!Elements.modeLabel) return;
+    Elements.modeLabel.textContent = State.isScheduleMode ? `${RUSH_TIME} 自动抢` : '立即预订';
+}
+
 // ============ 状态管理 ============
 const State = {
     isScheduleMode: true,
     pendingCell: null,
     dialogAction: '',
     isLoading: false,
-    fetchToken: 0
+    fetchToken: 0,
+    lastJobSig: '',
+    submitting: false,
+    fastPollTimer: null,
+    lastPendingJobId: ''
 };
 
 // ============ 前端缓存管理 ============
@@ -158,6 +171,7 @@ const AvailabilityCache = {
 const Elements = {
     dateInput: document.getElementById('date'),
     modeSwitch: document.getElementById('modeSwitch'),
+    modeLabel: document.getElementById('modeLabel'),
     tbody: document.getElementById('schedule-tbody'),
     confirmDialog: document.getElementById('confirm-dialog'),
     loginDialog: document.getElementById('login-dialog'),
@@ -172,7 +186,7 @@ const Elements = {
 
 function renderCurrentUsername() {
     if (!Elements.currentUsername) return;
-    Elements.currentUsername.textContent = window.__auth?.username || 'Not logged in';
+    Elements.currentUsername.textContent = window.__auth?.username || '未登录';
 }
 
 function setLoading(isLoading, message = '加载中...') {
@@ -203,40 +217,44 @@ async function fetchLocalBookings(date, forceRefresh) {
     return others;
 }
 
-// ============ 骨架屏 ============
-function showSkeleton() {
-    const tbody = Elements.tbody;
-    tbody.innerHTML = '';
+// ============ 骨架屏（已由 loading-overlay 承担，保留空实现兼容旧调用） ============
+function showSkeleton() {}
 
-    for (let i = 1; i <= 15; i++) {
-        const tr = document.createElement('tr');
-        tr.className = 'skeleton-row';
-        tr.innerHTML = `
-            <td class="skeleton skeleton-label"></td>
-            ${Array(12).fill('<td class="skeleton skeleton-cell"></td>').join('')}
-        `;
-        tbody.appendChild(tr);
-    }
+// ============ 表格结构（一次性构建 + 单元格索引 + 余位统计） ============
+const CellMap = { map: new Map() };
+
+function buildCell(court, hour) {
+    const key = court + '-' + hour;
+    let cell = CellMap.map.get(key);
+    if (cell) return cell;
+    cell = document.createElement('td');
+    cell.className = 'hour-cell';
+    cell.dataset.court = court;
+    cell.dataset.hour = hour;
+    CellMap.map.set(key, cell);
+    return cell;
 }
 
-// ============ 初始化表格 ============
 function initTable() {
     const tbody = Elements.tbody;
     tbody.innerHTML = '';
-
+    CellMap.map.clear();
     for (let i = 1; i <= 15; i++) {
         const tr = document.createElement('tr');
         const paddedIndex = i.toString().padStart(2, '0');
         tr.innerHTML = `<td class="court-label">场地 ${paddedIndex}</td>`;
-
         for (let h = 9; h <= 20; h++) {
-            const td = document.createElement('td');
-            td.className = 'hour-cell';
-            td.dataset.court = i;
-            td.dataset.hour = h;
-            tr.appendChild(td);
+            tr.appendChild(buildCell(i, h));
         }
         tbody.appendChild(tr);
+    }
+}
+
+// 只重置样式，不重建 DOM（刷新时表格不闪烁）
+function clearCells() {
+    for (const cell of CellMap.map.values()) {
+        cell.className = 'hour-cell';
+        cell.style.pointerEvents = '';
     }
 }
 
@@ -250,7 +268,6 @@ function initDate() {
 // ============ 获取并渲染预约数据 ============
 window.fetchAndRenderBookings = async function(forceRefresh = false) {
     const date = Elements.dateInput.value;
-    console.log('fetchAndRenderBookings - date:', date);
     if (!window.__auth) {
         const ok = await promptLogin();
         if (!ok) {
@@ -282,12 +299,10 @@ window.fetchAndRenderBookings = async function(forceRefresh = false) {
     try {
         // 如果没有缓存，从服务器获取
         if (!data) {
-            console.log('发送 availability 请求...');
             setLoading(true, '正在获取场地数据...');
 
             // 获取 access_token
             const accessToken = window.__token || Auth.loadToken();
-            console.log('Token 状态:', accessToken ? '存在' : '不存在', 'window.__token:', window.__token ? '有' : '无', 'localStorage:', Auth.loadToken() ? '有' : '无');
             if (!accessToken) {
                 // 没有 token，需要重新登录
                 Elements.statusText.textContent = '需要登录';
@@ -313,34 +328,34 @@ window.fetchAndRenderBookings = async function(forceRefresh = false) {
                     bookdate: date
                 })
             });
-            console.log('请求体:', JSON.stringify({ token: accessToken?.substring(0, 20) + '...', bookdate: date }));
             data = await resp.json();
-            console.log('availability 响应:', data);
 
             // 存入前端缓存
             if (data.ok) {
                 AvailabilityCache.set(date, data);
             }
-        } else {
-            console.log('使用前端缓存');
         }
 
         if (fetchId !== State.fetchToken) return;
 
-        // 重置表格（移除骨架屏）
-        initTable();
-
-        // 重置所有单元格
-        document.querySelectorAll('.hour-cell').forEach(cell => {
-            cell.className = 'hour-cell';
-            cell.style.pointerEvents = '';
-        });
+        // 复用既有表格结构，仅重置单元格样式（不再整表重建）。
+        // 记录当前处于 pending 的格子：任务仍在跑时，周期性刷新不能把状态洗掉
+        const pendingKeys = [...CellMap.map.entries()]
+            .filter(([, c]) => c.classList.contains('pending'))
+            .map(([k]) => k);
+        if (!CellMap.map.size) initTable();
+        clearCells();
 
         if (!data.ok) {
             console.warn('availability error', data.error, data);
 
-            // token 过期或登录失败：重新登录
+            // token 过期或登录失败：先尝试静默续期，失败才弹登录框
             if (data.error === 'login_failed' || data.error === 'no_resources' || data.error === 'token_required') {
+                const refreshed = await trySilentRefresh();
+                if (refreshed) {
+                    Toast.info('登录已续期', '');
+                    return fetchAndRenderBookings(true);
+                }
                 Elements.statusText.textContent = '需要重新登录';
                 Toast.warning('登录过期', '请重新登录');
                 Auth.clearToken();
@@ -379,13 +394,15 @@ window.fetchAndRenderBookings = async function(forceRefresh = false) {
             for (const s of res.slots) {
                 const hour = (s.kssj || '').split(':')[0];
                 const hourInt = parseInt(hour, 10);
-                const cell = document.querySelector(`.hour-cell[data-court='${court}'][data-hour='${hourInt}']`);
+                const cell = CellMap.map.get(`${court}-${hourInt}`);
                 if (!cell) continue;
 
                 if (s.bookedByMe) {
                     cell.classList.add('selected');
+                    cell.title = '我的预约 · 点击可取消排队';
                 } else if ((s.canAppointmentNumber ?? 0) <= 0) {
                     cell.classList.add('reserved');
+                    cell.title = '已被约满';
                     cell.style.pointerEvents = 'none';
                 } else {
                     const me = window.__auth?.username || '';
@@ -399,14 +416,37 @@ window.fetchAndRenderBookings = async function(forceRefresh = false) {
                     if (match) {
                         if (match.username === me) {
                             cell.classList.add('selected');
+                            cell.title = '我的预约 · 点击可取消排队';
                         } else {
                             cell.classList.add('others');
+                            cell.title = '他人正在排队';
                         }
+                    } else {
+                        cell.title = '可预约 · 点击预订';
                     }
                 }
             }
         }
 
+        // 已过时段降权显示（今天之前的日期整格标灰；仅外观）
+        const _now = new Date();
+        for (const [key, cell] of CellMap.map) {
+            const [, hr] = key.split('-').map(Number);
+            const endAt = new Date(`${date}T${String(hr).padStart(2, '0')}:00:00+08:00`);
+            const isPast = !isNaN(endAt) && endAt <= _now;
+            cell.classList.toggle('past', isPast);
+            if (isPast) cell.title = '已过时段';
+        }
+
+        // 绘制完成后，把仍在排队中的格子恢复 pending 标记
+        for (const key of pendingKeys) {
+            const cell = CellMap.map.get(key);
+            if (cell && !cell.classList.contains('selected')
+                     && !cell.classList.contains('reserved')
+                     && !cell.classList.contains('others')) {
+                cell.classList.add('pending');
+            }
+        }
         Elements.statusText.textContent = '已连接';
         Elements.lastUpdate.textContent = `上次更新: ${new Date().toLocaleTimeString()}`;
 
@@ -420,26 +460,72 @@ window.fetchAndRenderBookings = async function(forceRefresh = false) {
     }
 };
 
-// ============ 轮询后台任务 ============
+// ============ 静默续期（服务端保存过账号时无需手动重登） ============
+async function trySilentRefresh() {
+    const username = window.__auth?.username;
+    if (!username) return null;
+    try {
+        const resp = await fetch('/api/auth/refresh', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ username })
+        });
+        const json = await resp.json();
+        if (json.ok && json.data?.access_token) {
+            window.__token = json.data.access_token;
+            Auth.saveToken(window.__token);
+            return window.__token;
+        }
+    } catch (e) {}
+    return null;
+}
+
+// ============ 提交后的快轮询通道（3s 一次，待确认格清零后自动停止） ============
+function armFastPolling() {
+    if (State.fastPollTimer) return;
+    State.fastPollTimer = setInterval(async () => {
+        await pollJobs();
+        if (!document.querySelector('.hour-cell.pending')) {
+            clearInterval(State.fastPollTimer);
+            State.fastPollTimer = null;
+        }
+    }, 3000);
+}
+
+// ============ 轮询后台任务（仅在状态迁移时刷新表格） ============
 async function pollJobs() {
     const username = window.__auth?.username;
     const date = Elements.dateInput.value;
-    if (!username || !date) return;
+    if (!username || !date || State.isLoading) return;
 
     try {
-        const resp = await fetch('/api/jobs');
+        const resp = await fetch(`/api/jobs?username=${encodeURIComponent(username)}`);
         const j = await resp.json();
         if (!j.ok) return;
 
-        const all = j.data?.db_jobs || [];
-        const mine = all.filter(x => x.username === username && x.bookdate === date);
-        if (mine.length === 0) return;
+        const mine = (j.data?.db_jobs || []).filter(x => x.bookdate === date);
+        // 用任务签名对比：只有状态真的变化才触发刷新，不再每30s重复全量拉取
+        const sig = mine.map(x => `${x.job_id}:${x.status}`).sort().join('|');
+        if (sig === State.lastJobSig) return;
+        State.lastJobSig = sig;
 
         const finished = mine.some(x =>
             ['done', 'failed', 'cancelled', 'skipped'].includes(String(x.status || '').toLowerCase())
         );
         if (finished) {
-            await fetchAndRenderBookings();
+            // 首次迁移到终态时给出明确结果提示（签名去重保证只提示一次）
+            let t = '';
+            if (State.lastPendingJobId) {
+                const own = mine.find(x => x.job_id === State.lastPendingJobId);
+                if (own && ['done','failed','cancelled','skipped'].includes(String(own.status||'').toLowerCase())) {
+                    t = String(own.status).toLowerCase();
+                    State.lastPendingJobId = '';
+                }
+            }
+            if (t === 'done')        Toast.success('抢位成功', '预约已确认');
+            else if (t === 'skipped') Toast.info('无需重复预约', '您当天已有预约记录');
+            else if (t === 'failed')  Toast.error('未能预约成功', '时段可能已被抢完或未通过校验');
+            await fetchAndRenderBookings(true);
         }
     } catch (e) {}
 }
@@ -566,7 +652,7 @@ function promptLogin() {
         const resetDialog = () => {
             hideLoginError();
             hideCaptchaField();
-            if (titleEl) titleEl.textContent = '🔐 登录';
+            if (titleEl) titleEl.textContent = '登录';
             if (submitBtn) submitBtn.textContent = '登录';
             _captchaSessionId = null;
         };
@@ -626,7 +712,6 @@ function promptLogin() {
                     // 登录成功，保存 token
                     window.__auth = { username: u, password: p };
                     window.__token = result.data?.access_token;
-                    console.log('登录成功, token:', window.__token ? '已获取' : '未获取');
                     Auth.save(window.__auth);
                     if (window.__token) {
                         Auth.saveToken(window.__token);
@@ -643,11 +728,11 @@ function promptLogin() {
                         captchaImg.src = img;
                     }
                     showLoginError('验证码识别失败，请手动输入');
-                    if (titleEl) titleEl.textContent = '🔐 登录 (验证码)';
+                    if (titleEl) titleEl.textContent = '登录 (验证码)';
                 } else if (result.error_type === 'password_error') {
                     // 密码错误
                     showLoginError('用户名或密码错误');
-                    if (titleEl) titleEl.textContent = '🔐 登录 (密码错误)';
+                    if (titleEl) titleEl.textContent = '登录 (密码错误)';
                 } else if (result.error_type === 'captcha_error') {
                     // 验证码错误（手动输入后仍然错误）
                     showLoginError('验证码错误，请重新输入');
@@ -687,6 +772,14 @@ function promptLogin() {
 async function handleCellClick(cell) {
     if (State.isLoading) {
         Toast.info('请等待', '数据加载中');
+        return;
+    }
+    if (cell.classList.contains('pending')) {
+        Toast.info('处理中', '该时段的预约请求正在执行');
+        return;
+    }
+    if (State.submitting) {
+        Toast.info('请稍候', '上一笔预约仍在处理中');
         return;
     }
     if (!window.__auth) {
@@ -734,7 +827,7 @@ async function handleCellClick(cell) {
         ${State.dialogAction === 'book' && State.isScheduleMode ? `
         <div class="dialog-info-item">
             <span class="dialog-info-label">模式</span>
-            <span class="dialog-info-value" style="color: var(--primary)">21:00 自动抢票</span>
+            <span class="dialog-info-value" style="color: var(--primary)">${RUSH_TIME} 自动抢票</span>
         </div>
         ` : ''}
     `;
@@ -754,8 +847,15 @@ async function handleDialogConfirm() {
 
     Elements.confirmDialog.close();
 
-    if (State.dialogAction === 'book') {
-        try {
+    if (State.submitting) {
+        Toast.info('请稍候', '上一笔预约仍在处理中');
+        return;
+    }
+    State.submitting = true;
+    State.pendingCell = null;
+
+    try {
+        if (State.dialogAction === 'book') {
             const username = window.__auth?.username;
             const password = window.__auth?.password;
             if (!username || !password) {
@@ -763,72 +863,76 @@ async function handleDialogConfirm() {
                 return;
             }
 
-            let resp;
+            const baseBody = {
+                login_url: window.login_url,
+                captcha_url: window.captcha_url,
+                username, password,
+                bookdate: date,
+                kssj: `${hour}:00`,
+                jssj: `${end}:00`,
+                resources_name: `羽毛球${court}号场地`
+            };
+            const postJson = (path, body) => fetch(path, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify(body)
+            }).then(r => r.json());
+
+            let data;
+
             if (State.isScheduleMode) {
-                resp = await fetch('/api/book/schedule', {
-                    method: 'POST',
-                    headers: { 'Content-Type': 'application/json' },
-                    body: JSON.stringify({
-                        login_url: window.login_url,
-                        captcha_url: window.captcha_url,
-                        username, password,
-                        bookdate: date,
-                        kssj: `${hour}:00`,
-                        jssj: `${end}:00`,
-                        resources_name: `羽毛球${court}号场地`,
-                        target_time_str: '21:00:00',
-                        num_threads: 5,
-                        run_async: true
-                    })
-                });
+                // 定时抢票：入队即返回
+                const body = { ...baseBody, target_time_str: `${RUSH_TIME}:00`, num_threads: 2 };
+                data = await postJson('/api/book/schedule', body);
+                if (!data.ok && data.error === 'login_failed') {
+                    const refreshed = await trySilentRefresh();
+                    if (refreshed) data = await postJson('/api/book/schedule', body);
+                }
+                if (data.ok) {
+                    cell.classList.add('selected');
+                    Toast.success('已排队', `已加入${RUSH_TIME}抢票队列`);
+                }
             } else {
-                resp = await fetch('/api/book', {
-                    method: 'POST',
-                    headers: { 'Content-Type': 'application/json' },
-                    body: JSON.stringify({
-                        login_url: window.login_url,
-                        captcha_url: window.captcha_url,
-                        username, password,
-                        bookdate: date,
-                        kssj: `${hour}:00`,
-                        jssj: `${end}:00`,
-                        resources_name: `羽毛球${court}号场地`
-                    })
-                });
+                // 即时预约：走异步任务接口，毫秒级返回，结果经轮询刷新
+                data = await postJson('/api/jobs/immediate', baseBody);
+                if (!data.ok && data.error === 'login_failed') {
+                    const refreshed = await trySilentRefresh();
+                    if (refreshed) data = await postJson('/api/jobs/immediate', baseBody);
+                }
+                if (data.ok) {
+                    cell.classList.add('pending');
+                    State.lastPendingJobId = data.data?.job_id || '';
+                    State.lastJobSig = '';   // 重置签名，让快轮询能感知状态迁移
+                    armFastPolling();
+                    Toast.info('已提交', '正在为您抢位，请留意格子变化…');
+                }
             }
 
-            const data = await resp.json();
-            if (data.ok) {
-                cell.classList.add('selected');
-                Toast.success('预约成功', State.isScheduleMode ? '已加入21:00抢票队列' : '预约请求已提交');
-            } else {
+            if (!data.ok) {
                 // 资源已被其他用户预约
                 if (data.error === 'resource_already_booked') {
                     Toast.error('预约失败', '该时间段已被其他用户预约');
                     await fetchAndRenderBookings(true);
                     return;
                 }
-                // 登录失败，需要重新登录
+                // 登录失败（含刷新失败），需要重新登录
                 if (data.error === 'login_failed') {
                     Toast.error('登录失败', '账号或密码错误，请重新登录');
                     Auth.clear();
                     window.__auth = null;
                     renderCurrentUsername();
                     AvailabilityCache.clear();
-                    const ok = await promptLogin();
-                    if (ok) {
+                    const okLogin = await promptLogin();
+                    if (okLogin) {
                         await fetchAndRenderBookings(true);
                     }
                     return;
                 }
-                Toast.error('预约失败', data.error || '未知错误');
+                Toast.error('提交失败', data.error || '未知错误');
             }
-        } catch (e) {
-            Toast.error('请求异常', e.message);
-        }
-    } else if (State.dialogAction === 'cancel') {
-        try {
+        } else if (State.dialogAction === 'cancel') {
             const username = window.__auth?.username;
+            let stopData = null;
             if (username) {
                 const resp = await fetch('/api/jobs/stop_by_params', {
                     method: 'POST',
@@ -839,26 +943,39 @@ async function handleDialogConfirm() {
                         kssj: `${hour}:00`,
                         jssj: `${end}:00`,
                         resources_name: `羽毛球${court}号场地`,
-                        current_username: username
+                        current_username: username,
+                        access_token: window.__token || Auth.loadToken() || ''
                     })
                 });
                 const data = await resp.json();
                 if (!data.ok) {
-                    Toast.error('取消失败', data.data?.message || '无权取消此任务');
+                    Toast.error('取消失败', data.data?.message || data.data?.error || '无权取消此任务');
                     return;
                 }
+                stopData = data.data || {};
             }
             // 先移除样式，立即给用户反馈
-            cell.classList.remove('selected', 'others');
-            Toast.success('已取消', '预约已取消');
+            cell.classList.remove('selected', 'others', 'pending');
+            // 按上游撤销结果给出如实提示
+            const status = stopData?.upstream_status;
+            if (status === 'cancelled') {
+                Toast.success('已取消', '学校侧预约已撤销');
+            } else if (status === 'failed') {
+                Toast.warning('已停止排队', `学校侧撤销失败：${stopData.message || '未知原因'}，请到学校网站确认`, 5000);
+            } else if (stopData?.message) {
+                Toast.info('已取消排队', stopData.message, 4500);
+            } else {
+                Toast.success('已取消', '预约已取消');
+            }
             // 强制刷新数据，跳过缓存
             await fetchAndRenderBookings(true);
-        } catch (e) {
-            Toast.error('取消失败', e.message);
         }
+    } catch (e) {
+        Toast.error('请求异常', e.message);
+        cell.classList.remove('pending');
+    } finally {
+        State.submitting = false;
     }
-
-    State.pendingCell = null;
 }
 
 // ============ 事件绑定 ============
@@ -870,7 +987,8 @@ function bindEvents() {
     Elements.modeSwitch.addEventListener('click', () => {
         State.isScheduleMode = !State.isScheduleMode;
         Elements.modeSwitch.classList.toggle('active', State.isScheduleMode);
-        Toast.info('模式切换', State.isScheduleMode ? '已切换为21:00抢票模式' : '已切换为直接预约模式');
+        syncModeLabel();
+        Toast.info('模式切换', State.isScheduleMode ? `已切换为${RUSH_TIME}自动抢票` : '已切换为立即预订');
     });
 
     // 日期变化
@@ -921,6 +1039,49 @@ function bindEvents() {
         }
     });
 
+    // 聚焦系统（变暗式，不叠色）：
+    //   悬停格子        -> 行 + 列 同时保持明亮（十字），其余变暗
+    //   悬停场地标签/表头/底部统计 -> 单轴聚焦
+    const gridTable = document.getElementById('schedule-table');
+    let fxKey = null;   // "row:c" / "col:h" / null
+    const clearOrigin = () => {};
+    const setFx = (key) => {
+        if (key === fxKey) { return; }
+        gridTable.classList.toggle('dimming', key !== null);
+        const parts = key ? key.split(':') : [];
+        const kind = parts[0];
+        for (const [ck, cell] of CellMap.map) {
+            const seg = ck.split('-');
+            const on =
+                !key ? false :
+                kind === 'row' ? seg[0] === parts[1] :
+                                 seg[1] === parts[1];
+            cell.classList.toggle('fx-on', on);
+        }
+        fxKey = key;
+    };
+
+    // 注：格子悬停的「列名发光」已改为纯 CSS :has() 声明式实现（见 main.css），
+    // 与行名同为浏览器原生悬停态，无 JS 状态、不会残留。
+    Elements.tableContainer.addEventListener('mouseover', (e) => {
+        const courtTag = e.target.closest('.court-label');
+        if (courtTag) {
+            const tr = courtTag.closest('tr');
+            const cell = tr && tr.querySelector('.hour-cell');
+            setFx(cell ? `row:${cell.dataset.court}` : null);
+            return;
+        }
+        const hourTag = e.target.closest('th[data-hour], .foot-num');
+        if (hourTag) {
+            setFx(`col:${hourTag.dataset.hour || hourTag.dataset.footHour}`);
+            return;
+        }
+        setFx(null);
+    });
+    Elements.tableContainer.addEventListener('mouseleave', () => { setFx(null); });
+
+
+
     // 表格点击 (事件委托)
     Elements.tbody.addEventListener('click', (e) => {
         const cell = e.target.closest('.hour-cell');
@@ -948,6 +1109,7 @@ async function init() {
     Theme.init();
     initTable();
     initDate();
+    syncModeLabel();
     bindEvents();
 
     // 先加载配置
@@ -976,10 +1138,10 @@ async function init() {
         if (window.__auth) await fetchAndRenderBookings();
     }, 60000);
 
-    // 轮询任务状态（10秒）
+    // 轮询任务状态（30秒）
     setInterval(pollJobs, 30000);
 }
 
 // 启动
 document.addEventListener('DOMContentLoaded', init);
-// cache bust: 1779900696
+// cache bust: 20260827

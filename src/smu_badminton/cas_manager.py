@@ -1,6 +1,5 @@
-import typing as t
 import threading
-from typing import Any, Dict, List, Optional, Tuple, Optional
+from typing import Any, Dict, List, Optional, Tuple
 from enum import Enum
 import time
 import uuid
@@ -8,26 +7,29 @@ import logging
 
 # 从各模块导入
 from .cas_login import login_with_retry
-from .token_profile import get_cached_token, cache_token_for_user
+from .token_profile import get_cached_token, cache_token_for_user, refresh_token_for_user, token_exp_epoch
 from .booking_api import (
     fetch_resource_time_id,
     make_appointment,
     list_appointments_for_account,
     check_resource_time_slot_capacity,
     solve_and_verify_slide_captcha,
+    resolve_user_info,
+    find_my_appointment_id,
+    check_appointment_cancel_time,
+    update_appointment_state,
 )
 from .http_utils import (
     get_network_time,
     get_target_datetime_from_network,
+    ClockSync,
 )
 
 # 导入核心工具模块
 from .core_utils import (
     get_db_pool,
-    DatabaseError,
     handle_errors,
     db_operation,
-    BookingError,
     success_response,
     obfuscate_password,
     deobfuscate_password,
@@ -35,6 +37,123 @@ from .core_utils import (
 
 # 配置日志
 logger = logging.getLogger(__name__)
+
+
+# ============= 抢票节奏常量（2026-08-27 对上游实测定案）=============
+#
+# 实测结论（scripts/test_captcha_reuse.py）：
+# 1. 上游对 saveAppointmentInformationAll 按账号限流：约 2 连发内安全，
+#    第 3 发立即触发「频繁调用接口，禁用3分钟」→ 并发枪数硬上限为 2；
+# 2. 滑块验证码一次性消费：同一凭证第二次提交返回「验证码不能重复使用」，
+#    且第一枪即被烧掉 → 每枪必须自带独立凭证，在预取窗口内解好几份备着；
+# 3. 验证码求解单次成功率约 70%，失败为 checkCaptcha 4001，重试即可，
+#    重试冗余放在预取窗口（时间充裕），不放 T-0；
+# 4. 服务端先验验证码后走业务，无效凭证返回「系统异常」。
+
+# 并发提交枪数上限（受上游账号级频控约束）
+MAX_UPSTREAM_BURST = 2
+
+# 距目标时刻多少秒唤醒，进入预取窗口（登录/预取/验证码池构建）
+PREFETCH_WINDOW_SEC = 75
+
+# 验证码池构建最晚截止点（距目标时刻秒数）；此后不再尝试解新码
+CAPTCHA_HARD_STOP_BEFORE_SEC = 35
+
+# 抢票请求超时秒数（快速失败；预约接口正常 <1s 返回）
+RUSH_REQUEST_TIMEOUT_SEC = 4
+
+# token exp 距目标时刻不足该秒数时提前重新登录
+TOKEN_EXP_BUFFER_SEC = 120
+
+
+def _classify_upstream_response(resp) -> str:
+    """对 saveAppointmentInformationAll 的响应分类（展开 GraphQL 包体）。
+
+    Returns:
+        success / banned / captcha_error / other
+    """
+    if not isinstance(resp, dict):
+        return "other"
+    inner = resp
+    data = resp.get("data")
+    if isinstance(data, dict) and isinstance(data.get("saveAppointmentInformationAll"), dict):
+        inner = data["saveAppointmentInformationAll"]
+    code = str(inner.get("code", "")).lower()
+    if code in ("0", "success"):
+        return "success"
+    msgs = " ".join(str(m) for m in inner.get("messages") or [])
+    if any(k in msgs for k in ("频繁", "禁用", "禁止", "解禁")):
+        return "banned"
+    if "验证码" in msgs or "captcha" in msgs.lower():
+        return "captcha_error"
+    return "other"
+
+
+# ============= 等待辅助（定时任务共用） =============
+
+def _sleep_coarse(diff_sec: float) -> None:
+    """长等待的分级休眠策略，适应跨天等待场景。"""
+    if diff_sec > 3 * 24 * 60 * 60:  # > 3天
+        time.sleep(12 * 60 * 60)  # 休眠12小时
+    elif diff_sec > 24 * 60 * 60:  # > 1天
+        time.sleep(6 * 60 * 60)  # 休眠6小时
+    elif diff_sec > 6 * 60 * 60:  # > 6小时
+        time.sleep(2 * 60 * 60)  # 休眠2小时
+    elif diff_sec > 2 * 60 * 60:  # > 2小时
+        time.sleep(30 * 60)  # 休眠30分钟
+    elif diff_sec > 30 * 60:  # > 30分钟
+        time.sleep(5 * 60)  # 休眠5分钟
+    elif diff_sec > 10 * 60:  # > 10分钟
+        time.sleep(60)  # 休眠1分钟
+    else:
+        time.sleep(10)
+
+
+def _sleep_fine(diff_sec: float) -> None:
+    """临近目标时间的精细休眠。"""
+    if diff_sec > 10:
+        time.sleep(5)
+    elif diff_sec > 1:
+        time.sleep(0.5)
+    else:
+        time.sleep(0.1)
+
+
+def _wait_until(
+    target_time,
+    wake_delta_sec: float,
+    cancel_event: Optional[threading.Event] = None,
+    now_fn=None
+) -> bool:
+    """等待直到距 target_time 不足 wake_delta_sec 秒。
+
+    now_fn 为空时沿用旧行为：每轮调用 get_network_time()（HTTP 对时，精度受 RTT 抖动）。
+    抢票关键窗口应传入 ClockSync.now（本地钟 + 预校准偏移，无 HTTP）。
+
+    Returns:
+        True 表示到达唤醒窗口；False 表示被取消。
+    """
+    while cancel_event is None or not cancel_event.is_set():
+        if now_fn is not None:
+            now = now_fn()
+        else:
+            now = get_network_time()
+        if now:
+            diff_sec = (target_time - now).total_seconds()
+            if diff_sec <= wake_delta_sec:
+                return True
+            if wake_delta_sec > 0:
+                _sleep_coarse(diff_sec)
+            elif diff_sec > 10:
+                # 可取消时分片休眠，保证 stop 响应在 1s 内
+                time.sleep(1.0 if cancel_event is not None else 5.0)
+            elif diff_sec > 1:
+                time.sleep(0.5)
+            else:
+                time.sleep(0.1)
+        else:
+            time.sleep(1)
+    return False
 
 
 # ============= Token 获取（缓存或登录）=============
@@ -282,20 +401,6 @@ class BookingManager:
             logger.error(f"更新任务状态失败: {job_id}, {e}")
             return False
 
-    @db_operation
-    def _update_job_row_status(self, job_id: str, status: str):
-        """更新任务状态（兼容旧接口，建议使用 _safe_update_status）。"""
-        with self._db_pool.get_connection() as conn:
-            conn.execute("UPDATE scheduled_jobs SET status=? WHERE job_id=?", (status, job_id))
-        logger.debug(f"任务状态已更新: {job_id} -> {status}")
-
-    @db_operation
-    def _delete_job_row(self, job_id: str):
-        """删除任务记录"""
-        with self._db_pool.get_connection() as conn:
-            conn.execute("DELETE FROM scheduled_jobs WHERE job_id=?", (job_id,))
-        logger.debug(f"任务记录已删除: {job_id}")
-
     @handle_errors(default_return=None, log_error=True)
     def _get_job_row(self, job_id: str) -> Dict[str, Any] | None:
         """获取任务记录"""
@@ -367,54 +472,95 @@ class BookingManager:
             logger.debug(f"按参数标记 cancelled: {affected} 条任务记录")
             return affected
 
-    @handle_errors(default_return=0, log_error=True, error_message="按参数停止任务失败")
-    def stop_by_params(self, *, username: str, bookdate: str, kssj: str, jssj: str, resources_name: str) -> int:
+    @handle_errors(default_return={"stopped": 0}, log_error=True, error_message="按参数停止任务失败")
+    def stop_by_params(
+        self,
+        *,
+        username: str, bookdate: str, kssj: str, jssj: str, resources_name: str,
+        access_token: str = "", id_token: str = "",
+    ) -> Dict[str, Any]:
         """
-        根据预约参数停止任务
-        
+        根据预约参数停止任务，并尽力撤销上游已生效的预约。
+
         流程：
         1. 停止内存中的活跃任务
         2. 将数据库中的对应任务标记为 cancelled（保留历史记录）
-        3. 删除本地预约记录（统一删除一次）
-        
+        3. 删除本地预约记录
+        4. 上游撤销：凭 access_token 或服务端保存的账号静默重登，
+           定位匹配的预约后调用官方 checkAppointmentCancelTime + updateAppointmentInformationState
+
         Returns:
-            总共停止的任务数量
+            {"stopped": int, "upstream_status": "cancelled"|"none"|"skipped"|"failed", "message": str}
         """
+        # 1. 停止内存中的任务
         stopped = 0
-        
-        # 1. 停止内存中的任务（不让它们删除local_booking，统一在最后删除）
         ids = self.find_job_ids_by_params(
-            username=username, 
-            bookdate=bookdate, 
-            kssj=kssj, 
-            jssj=jssj, 
+            username=username,
+            bookdate=bookdate,
+            kssj=kssj,
+            jssj=jssj,
             resources_name=resources_name
         )
         for jid in ids:
             if self.stop_job(jid, delete_local_booking=False):
                 stopped += 1
-        
-        # 2. 将数据库中的对应任务标记为 cancelled（仅处理仍在等待/运行中的任务）
-        cancelled = self._cancel_scheduled_by_params(
-            username=username, 
-            bookdate=bookdate, 
-            kssj=kssj, 
-            jssj=jssj, 
+
+        # 2/3. 标记 cancelled + 删除本地记录
+        stopped += self._cancel_scheduled_by_params(
+            username=username,
+            bookdate=bookdate,
+            kssj=kssj,
+            jssj=jssj,
             resources_name=resources_name
         )
-        stopped += cancelled
-        
-        # 3. 删除本地预约记录（统一删除一次）
         self._delete_local_booking(
-            username=username, 
-            bookdate=bookdate, 
-            kssj=kssj, 
-            jssj=jssj, 
+            username=username,
+            bookdate=bookdate,
+            kssj=kssj,
+            jssj=jssj,
             resources_name=resources_name
         )
-        
-        logger.info(f"按参数停止任务完成: {stopped} 个任务, {username} - {bookdate} {kssj}-{jssj}")
-        return stopped
+
+        result: Dict[str, Any] = {"stopped": stopped, "upstream_status": "skipped", "message": ""}
+
+        # 4. 上游真取消：优先用调用方 token；否则尝试用保存的账号静默重登
+        if not access_token:
+            refreshed = refresh_token_for_user(username)
+            if refreshed and refreshed.get("access_token"):
+                access_token = refreshed["access_token"]
+                id_token = refreshed.get("id_token", "")
+
+        if not access_token:
+            result["upstream_status"] = "skipped"
+            result["message"] = "无可用登录凭据，仅取消了本地排队"
+            logger.info("按参数停止: %s 无可用凭据，跳过上游撤销", username)
+            return result
+
+        try:
+            appt_id = find_my_appointment_id(access_token, bookdate, kssj, jssj, resources_name, id_token=id_token)
+            if not appt_id:
+                result["upstream_status"] = "none"
+                result["message"] = "学校侧没有该时段的有效预约"
+                return result
+
+            allowed, chk_msg = check_appointment_cancel_time(access_token, appt_id, id_token=id_token)
+            if not allowed:
+                result["upstream_status"] = "failed"
+                result["message"] = f"当前不允许取消: {chk_msg or '未知原因'}（预约ID {appt_id}）"
+                return result
+
+            ok, upd_msg = update_appointment_state(access_token, appt_id, id_token=id_token)
+            if ok:
+                result["upstream_status"] = "cancelled"
+                result["message"] = "学校侧预约已撤销"
+            else:
+                result["upstream_status"] = "failed"
+                result["message"] = f"撤销失败: {upd_msg}（预约ID {appt_id}）"
+        except Exception as e:
+            logger.warning("上游撤销异常: %s", e)
+            result["upstream_status"] = "failed"
+            result["message"] = f"撤销异常: {e}"
+        return result
 
     @handle_errors(default_return=[], log_error=True, error_message="获取定时任务列表失败")
     def list_scheduled_jobs(self, username: str | None = None) -> List[Dict[str, Any]]:
@@ -511,6 +657,52 @@ class BookingManager:
                 matches = list(db_set)
         return list(dict.fromkeys(matches))
 
+    def day_booking_conflict(self, username: str, bookdate: str) -> str | None:
+        """检查同一用户同一天是否已有任务或预约记录，有则返回错误信息。"""
+        try:
+            for j in self.list_scheduled_jobs(username=username):
+                if (
+                    j.get("bookdate") == bookdate
+                    and j.get("status") in ("scheduled", "running")
+                ):
+                    return "您当天已有预约任务，每人每天只能预约一次"
+        except Exception:
+            pass
+        try:
+            with get_db_pool().get_connection(auto_commit=False) as conn:
+                cur = conn.execute(
+                    "SELECT 1 FROM local_bookings WHERE username=? AND bookdate=? LIMIT 1",
+                    (username, bookdate),
+                )
+                if cur.fetchone():
+                    return "您当天已有预约记录，每人每天只能预约一次"
+        except Exception as e:
+            logger.error(f"查询本地预约记录失败: {e}")
+        return None
+
+    def add_local_booking(self, username: str, bookdate: str, resources_name: str, kssj: str, jssj: str) -> str | None:
+        """写入本地预约记录，成功返回 None，失败返回错误码。"""
+        import sqlite3
+        try:
+            with get_db_pool().get_connection() as conn:
+                conn.execute(
+                    "INSERT INTO local_bookings (username, bookdate, resources_name, kssj, jssj, created_at) VALUES (?,?,?,?,?,?)",
+                    (username, bookdate, resources_name, kssj, jssj, time.time()),
+                )
+        except sqlite3.IntegrityError:
+            return "resource_already_booked"
+        except Exception as e:
+            logger.error(f"插入本地预约记录失败: {e}")
+            return "database_error"
+        return None
+
+    def remove_local_booking(self, username: str, bookdate: str, resources_name: str, kssj: str, jssj: str) -> None:
+        """删除本地预约记录（对外薄封装）。"""
+        self._delete_local_booking(
+            username=username, bookdate=bookdate,
+            resources_name=resources_name, kssj=kssj, jssj=jssj,
+        )
+
     def start_immediate_booking(
         self,
         *,
@@ -522,6 +714,7 @@ class BookingManager:
         kssj: str,
         jssj: str,
         resources_name: str,
+        rollback_local_on_fail: bool = False,
     ) -> str:
         cancel_event = threading.Event()
 
@@ -540,50 +733,68 @@ class BookingManager:
         }
 
         def run():
+            final_status = None
+
+            def _set(state):
+                nonlocal final_status
+                final_status = state
+                self._safe_update_status(job_id, state)
+
             try:
                 if cancel_event.is_set():
-                    self._safe_update_status(job_id, JobState.CANCELLED)
+                    _set(JobState.CANCELLED)
                     return
                 tokens = get_token_cached(login_url, captcha_url, username, password, ttl_seconds=900)
                 if not tokens or not tokens.get("access_token"):
-                    self._safe_update_status(job_id, JobState.FAILED)
+                    _set(JobState.FAILED)
                     return
                 if cancel_event.is_set():
-                    self._safe_update_status(job_id, JobState.CANCELLED)
+                    _set(JobState.CANCELLED)
                     return
                 access_token = tokens["access_token"]
                 id_token = tokens.get("id_token", "")
                 # 限制：同一用户同一天只能预约一次
                 try:
                     if list_appointments_for_account(access_token, bookdate, id_token=id_token):
-                        self._safe_update_status(job_id, JobState.SKIPPED)
+                        _set(JobState.SKIPPED)
                         return
                 except Exception:
                     pass
                 result = fetch_resource_time_id(access_token, bookdate, resources_name, kssj, jssj, id_token=id_token)
                 if not result:
-                    self._safe_update_status(job_id, JobState.FAILED)
+                    _set(JobState.FAILED)
                     return
                 resource_id, time_id, open_captcha_verify = result
                 if cancel_event.is_set():
-                    self._safe_update_status(job_id, JobState.CANCELLED)
+                    _set(JobState.CANCELLED)
                     return
+                user_info = resolve_user_info(access_token, id_token=id_token)
                 # 获取滑块验证码（如果需要）
                 captcha_id, captcha_code = "", ""
                 if open_captcha_verify == "1":
                     logger.info("资源需要滑块验证码，自动处理")
                     captcha_id, captcha_code = _get_slide_captcha(access_token)
-                resp = make_appointment(access_token, time_id, resource_id, bookdate, kssj, jssj, id_token=id_token, captcha_id=captcha_id, captcha_code=captcha_code)
-                # 根据预约结果更新状态
-                if resp and isinstance(resp, dict):
-                    code = resp.get("code", "")
-                    if code == "success" or code == "0":
-                        self._safe_update_status(job_id, JobState.DONE)
-                    else:
-                        self._safe_update_status(job_id, JobState.FAILED)
+                resp = make_appointment(
+                    access_token, time_id, resource_id, bookdate, kssj, jssj,
+                    id_token=id_token, captcha_id=captcha_id, captcha_code=captcha_code,
+                    user_info=user_info, allow_retry=False, timeout_seconds=8,
+                )
+                ok = isinstance(resp, dict) and str(resp.get("code", "")).lower() in ("0", "success")
+                if ok:
+                    _set(JobState.DONE)
                 else:
-                    self._safe_update_status(job_id, JobState.FAILED)
+                    logger.info("[任务 %s] 即时预约未成功 kind=%s", job_id[:8], _classify_upstream_response(resp))
+                    _set(JobState.FAILED)
             finally:
+                # 未成功的即时任务回滚本地占位记录（成功则保留为有效记录）
+                if rollback_local_on_fail and final_status in (JobState.FAILED, JobState.SKIPPED, JobState.CANCELLED):
+                    try:
+                        self._delete_local_booking(
+                            username=username, bookdate=bookdate,
+                            resources_name=resources_name, kssj=kssj, jssj=jssj,
+                        )
+                    except Exception as e:
+                        logger.warning(f"即时任务本地记录清理失败: {e}")
                 # 任务完成后从内存移除
                 with self._lock:
                     self._jobs.pop(job_id, None)
@@ -659,130 +870,153 @@ class BookingManager:
         cancel_event = threading.Event()
 
         def run():
-            # 等到预登录窗口
+            # ========== 计算目标时刻；长等待到预取窗口 ==========
             target_time = get_target_datetime_from_network(target_time_str, bookdate)
-            prelogin_delta_sec = 5 * 60
-            while not cancel_event.is_set():
-                now = get_network_time()
-                if now:
-                    diff_sec = (target_time - now).total_seconds()
-                    if diff_sec <= prelogin_delta_sec:
-                        break
-                    # 分级休眠策略，适应长时间跨天等待
-                    if diff_sec > 3 * 24 * 60 * 60:  # > 3天
-                        time.sleep(12 * 60 * 60)  # 休眠12小时
-                    elif diff_sec > 24 * 60 * 60:  # > 1天
-                        time.sleep(6 * 60 * 60)  # 休眠6小时
-                    elif diff_sec > 6 * 60 * 60:  # > 6小时
-                        time.sleep(2 * 60 * 60)  # 休眠2小时
-                    elif diff_sec > 2 * 60 * 60:  # > 2小时
-                        time.sleep(30 * 60)  # 休眠30分钟
-                    elif diff_sec > 30 * 60:  # > 30分钟
-                        time.sleep(5 * 60)  # 休眠5分钟
-                    elif diff_sec > 10 * 60:  # > 10分钟
-                        time.sleep(60)  # 休眠1分钟
-                    else:
-                        time.sleep(10)
-                else:
-                    time.sleep(1)
-            if cancel_event.is_set():
+            clock = ClockSync()
+
+            if not _wait_until(target_time, PREFETCH_WINDOW_SEC, cancel_event):
                 self._cleanup_job(job_id, JobState.CANCELLED, username=username, bookdate=bookdate, kssj=kssj, jssj=jssj, resources_name=resources_name)
                 return
 
-            # 登录
+            # 进入关键窗口：测「网络-本地」时钟偏移，此后等待不再发任何 HTTP
+            clock.sync(samples=3)
+
+            # ========== 登录（含 JWT exp 预检，杜绝 T-0 触发重新登录）==========
             tokens = get_token_cached(login_url, captcha_url, username, password, ttl_seconds=900)
             if not tokens or not tokens.get("access_token"):
                 self._cleanup_job(job_id, JobState.FAILED, username=username, bookdate=bookdate, kssj=kssj, jssj=jssj, resources_name=resources_name)
                 return
             access_token = tokens["access_token"]
+            id_token = tokens.get("id_token", "")
 
-            # 限制：同一用户同一天只能预约一次
+            exp_epoch = token_exp_epoch(access_token)
+            if exp_epoch is not None and exp_epoch < target_time.timestamp() + TOKEN_EXP_BUFFER_SEC:
+                logger.info("[任务 %s] token exp=%d 临近/早于目标时刻，提前刷新", job_id[:8], int(exp_epoch))
+                refreshed = refresh_token_for_user(username)
+                if refreshed and refreshed.get("access_token"):
+                    tokens = refreshed
+                    access_token = tokens["access_token"]
+                    id_token = tokens.get("id_token", "")
+                elif exp_epoch <= time.time():
+                    logger.error("[任务 %s] token 已过期且刷新失败", job_id[:8])
+                    self._cleanup_job(job_id, JobState.FAILED, username=username, bookdate=bookdate, kssj=kssj, jssj=jssj, resources_name=resources_name)
+                    return
+
+            # 预热连接池：预取阶段的查询全部走同一 Session，T-0 直接复用
+            session = _shared_session()
+
+            # ========== 一天一约去重检查（复用 session）==========
             try:
-                if list_appointments_for_account(access_token, bookdate, id_token=tokens.get("id_token", "")):
+                if list_appointments_for_account(access_token, bookdate, id_token=id_token, session=session):
                     self._cleanup_job(job_id, JobState.SKIPPED, username=username, bookdate=bookdate, kssj=kssj, jssj=jssj, resources_name=resources_name)
                     return
             except Exception:
                 pass
 
-            # 预取资源/时间段
-            result = fetch_resource_time_id(access_token, bookdate, resources_name, kssj, jssj, id_token=tokens.get("id_token", ""))
+            # ========== 预取资源/时段 ID 与用户信息（省掉 T-0 的 RTT）==========
+            result = fetch_resource_time_id(access_token, bookdate, resources_name, kssj, jssj, id_token=id_token, session=session)
             if not result:
                 self._cleanup_job(job_id, JobState.FAILED, username=username, bookdate=bookdate, kssj=kssj, jssj=jssj, resources_name=resources_name)
                 return
             resource_id, time_id, open_captcha_verify = result
 
-            # 更新状态为 running，表示正在抢票
+            user_info = resolve_user_info(access_token, id_token=id_token)
+
             self._safe_update_status(job_id, JobState.RUNNING)
 
-            barrier = threading.Barrier(num_threads)
-            results_lock = threading.Lock()
-            results: List[Dict[str, Any]] = []
+            # ========== 验证码预取池：一次性凭证，每枪一份，失败自动重试 ==========
+            shots = max(1, min(num_threads, MAX_UPSTREAM_BURST))
+            captcha_pool: List[Tuple[str, str]] = []
             need_captcha = open_captcha_verify == "1"
             if need_captcha:
-                logger.info("资源需要滑块验证码，将在预约时自动处理")
+                # 池构建最晚到 T-35s：留出对齐/发射的余量，不再临阵解新码
+                pool_deadline = target_time.timestamp() - CAPTCHA_HARD_STOP_BEFORE_SEC
+                logger.info("[任务 %s] 资源需要滑块验证码：构建预取池（目标 %d 份）", job_id[:8], shots)
+                while len(captcha_pool) < shots and time.time() < pool_deadline:
+                    if cancel_event.is_set():
+                        break
+                    try:
+                        creds = solve_and_verify_slide_captcha(access_token)
+                    except Exception as e:
+                        logger.warning("[任务 %s] 滑块验证码求解异常: %s", job_id[:8], e)
+                        creds = None
+                    if creds:
+                        captcha_pool.append(creds)
+                        logger.info("[任务 %s] 验证码预取进度 %d/%d", job_id[:8], len(captcha_pool), shots)
+                    else:
+                        time.sleep(0.2)  # 单次成功率约70%，快速重试
+                if len(captcha_pool) < shots:
+                    logger.warning("[任务 %s] 验证码池未攒满 %d/%d 份", job_id[:8], len(captcha_pool), shots)
+
+            # ========== 发射线程：本地钟对齐 T-0、各带一份凭证、成功即停 ==========
+            barrier = threading.Barrier(shots)
+            success_event = threading.Event()
+            results_lock = threading.Lock()
+            results: List[Dict[str, Any]] = []
 
             def worker(tid: int):
-                # 等待到目标时间
-                target_local = get_target_datetime_from_network(target_time_str, bookdate)
-                while not cancel_event.is_set():
-                    now = get_network_time()
-                    if now:
-                        diff = (target_local - now).total_seconds()
-                        if diff <= 0:
-                            break
-                        elif diff > 10:
-                            time.sleep(5)
-                        elif diff > 1:
-                            time.sleep(0.5)
-                        else:
-                            time.sleep(0.1)
-                    else:
-                        time.sleep(1)
-                if cancel_event.is_set():
-                    # 只有第一个 worker 执行清理
-                    if tid == 1:
+                creds = captcha_pool[tid] if tid < len(captcha_pool) else ("", "")
+                if need_captcha and not creds[0]:
+                    logger.warning("[任务 %s] 线程%d 无验证码凭证，仍将尝试提交", job_id[:8], tid)
+
+                # 关键窗口：用校准后的本地钟等待，零 HTTP
+                if not _wait_until(target_time, 0, cancel_event, now_fn=clock.now):
+                    if tid == 0:
                         self._cleanup_job(job_id, JobState.CANCELLED, username=username, bookdate=bookdate, kssj=kssj, jssj=jssj, resources_name=resources_name)
                     return
 
-                # 添加 barrier 超时
                 try:
-                    barrier.wait(timeout=30.0)
+                    barrier.wait(timeout=20.0)
                 except threading.BrokenBarrierError:
-                    logger.warning(f"Worker {tid} barrier 超时，任务可能已失败")
+                    logger.warning("[任务 %s] 线程%d barrier 超时", job_id[:8], tid)
                     with results_lock:
-                        results.append({"thread": tid, "response": None, "success": False, "error": "barrier_timeout"})
-                    if tid == 1:
+                        results.append({"tid": tid, "ok": False, "kind": "barrier_timeout"})
+                    if tid == 0:
                         self._cleanup_job(job_id, JobState.FAILED, username=username, bookdate=bookdate, kssj=kssj, jssj=jssj, resources_name=resources_name)
                     return
 
-                # 获取滑块验证码（如果需要）
-                captcha_id = ""
-                captcha_code = ""
-                if need_captcha:
-                    captcha_id, captcha_code = _get_slide_captcha(access_token)
-                    if not captcha_id:
-                        logger.warning("线程 %d 滑块验证码获取失败", tid)
+                # 任一枪命中即收工，避免多余请求消耗频控额度
+                if success_event.is_set():
+                    with results_lock:
+                        results.append({"tid": tid, "ok": False, "kind": "skipped_after_success"})
+                    return
 
-                resp = make_appointment(access_token, time_id, resource_id, bookdate, kssj, jssj, id_token=tokens.get("id_token", ""), captcha_id=captcha_id, captcha_code=captcha_code)
-                success = resp and isinstance(resp, dict) and resp.get("code") in ("success", "0")
+                resp = make_appointment(
+                    access_token, time_id, resource_id, bookdate, kssj, jssj,
+                    id_token=id_token,
+                    captcha_id=creds[0], captcha_code=creds[1],
+                    user_info=user_info,
+                    session=session,
+                    allow_retry=False,
+                    timeout_seconds=RUSH_REQUEST_TIMEOUT_SEC,
+                )
+                ok = isinstance(resp, dict) and str(resp.get("code", "")).lower() in ("0", "success")
+                kind = _classify_upstream_response(resp)
+                logger.info("[任务 %s] 线程%d 提交结果 ok=%s kind=%s", job_id[:8], tid, ok, kind)
+                if ok:
+                    success_event.set()
                 with results_lock:
-                    results.append({"thread": tid, "response": resp, "success": success})
-                # 不再在 worker 中更新状态，由主线程统一判断
+                    results.append({"tid": tid, "ok": ok, "kind": kind})
 
-            threads = [threading.Thread(target=worker, args=(i + 1,)) for i in range(num_threads)]
+            threads = [threading.Thread(target=worker, args=(i,)) for i in range(shots)]
             for t in threads:
                 t.start()
             for t in threads:
                 t.join()
 
-            # 所有 worker 完成后，统一判断状态
-            success_count = sum(1 for r in results if r.get("success"))
+            # ========== 汇总 ==========
+            success_count = sum(1 for r in results if r.get("ok"))
+            kinds = [r.get("kind") for r in results]
+            if any(k == "banned" for k in kinds):
+                logger.warning(
+                    "[任务 %s] 触发上游频控封禁（3 分钟）。如需补约请等解禁后另行处理",
+                    job_id[:8],
+                )
             if success_count > 0:
                 self._safe_update_status(job_id, JobState.DONE)
             else:
                 self._safe_update_status(job_id, JobState.FAILED)
 
-            # 清理内存
             with self._lock:
                 self._jobs.pop(job_id, None)
 
@@ -831,8 +1065,6 @@ def book_badminton_slot(
 
     Returns the response JSON from the booking API or an error dict.
     """
-    import uuid
-
     # 生成 job_id 用于追踪
     job_id = uuid.uuid4().hex
     created_at = time.time()
@@ -883,7 +1115,7 @@ def book_badminton_slot(
         _save_job_record(job_id, login_url, captcha_url, username, password, bookdate, kssj, jssj, resources_name, "", 1, "failed", created_at)
         return {"ok": False, "error": "capacity_check_failed", "detail": capacity_result}
 
-    resp_json = make_appointment(access_token, time_id, resource_id, bookdate, kssj, jssj, id_token=id_token, captcha_id=captcha_id, captcha_code=captcha_code)
+    resp_json = make_appointment(access_token, time_id, resource_id, bookdate, kssj, jssj, id_token=id_token, captcha_id=captcha_id, captcha_code=captcha_code, allow_retry=False, timeout_seconds=8)
 
     # 判断预约是否成功
     logger.info("make_appointment 返回: %s", resp_json)
@@ -913,122 +1145,5 @@ def _save_job_record(job_id, login_url, captcha_url, username, password, bookdat
             )
     except Exception as e:
         logger.warning(f"写入任务记录失败: {e}")
-
-
-def schedule_booking(
-    *,
-    login_url: str,
-    captcha_url: str,
-    username: str,
-    password: str,
-    bookdate: str,
-    kssj: str,
-    jssj: str,
-    resources_name: str,
-    target_time_str: str,
-    num_threads: int = 5,
-) -> Dict[str, Any]:
-    """Login, prefetch resource/time, and start N threads to book exactly at target time.
-
-    Returns a dict with per-thread results.
-    """
-    # 1) 先计算目标时间，并在距离目标时间5分钟时再登录刷新token
-    target_time = get_target_datetime_from_network(target_time_str, bookdate)
-    prelogin_delta_sec = 5 * 60
-    while True:
-        now = get_network_time()
-        if now:
-            diff_sec = (target_time - now).total_seconds()
-            if diff_sec <= prelogin_delta_sec:
-                break
-            # 分级休眠策略，适应长时间跨天等待
-            if diff_sec > 3 * 24 * 60 * 60:  # > 3天
-                time.sleep(12 * 60 * 60)  # 休眠12小时
-            elif diff_sec > 24 * 60 * 60:  # > 1天
-                time.sleep(6 * 60 * 60)  # 休眠6小时
-            elif diff_sec > 6 * 60 * 60:  # > 6小时
-                time.sleep(2 * 60 * 60)  # 休眠2小时
-            elif diff_sec > 2 * 60 * 60:  # > 2小时
-                time.sleep(30 * 60)  # 休眠30分钟
-            elif diff_sec > 30 * 60:  # > 30分钟
-                time.sleep(5 * 60)  # 休眠5分钟
-            elif diff_sec > 10 * 60:  # > 10分钟
-                time.sleep(60)  # 休眠1分钟
-            else:
-                time.sleep(10)
-        else:
-            time.sleep(1)
-
-    # 2) 到达预登录窗口，进行登录以获取新token
-    tokens = get_token_cached(login_url, captcha_url, username, password, ttl_seconds=900)
-    if not tokens or not tokens.get("access_token"):
-        return {"ok": False, "error": "login_failed"}
-    access_token = tokens["access_token"]
-    id_token = tokens.get("id_token", "")
-
-    # 限制：同一用户同一天只能预约一次
-    try:
-        my_edges = list_appointments_for_account(access_token, bookdate, id_token=id_token)
-        if my_edges:
-            return {"ok": False, "error": "user_already_booked_today"}
-    except Exception:
-        pass
-
-    # 3) 使用新token预取资源与时间段ID
-    result = fetch_resource_time_id(access_token, bookdate, resources_name, kssj, jssj, id_token=id_token)
-    if not result:
-        return {"ok": False, "error": "resource_or_time_not_found"}
-    resource_id, time_id, open_captcha_verify = result
-
-    # 4) 检查是否需要滑块验证码
-    need_captcha = open_captcha_verify == "1"
-    if need_captcha:
-        logger.info("资源需要滑块验证码，将在预约时自动处理")
-
-    barrier = threading.Barrier(num_threads)
-    results: List[Dict[str, Any]] = []
-    results_lock = threading.Lock()
-
-    def worker(thread_id: int):
-        # wait until target time using network time helpers
-        target_time_local = get_target_datetime_from_network(target_time_str, bookdate)
-        while True:
-            now = get_network_time()
-            if now:
-                diff_sec = (target_time_local - now).total_seconds()
-                if diff_sec <= 0:
-                    break
-                elif diff_sec > 10:
-                    time.sleep(5)
-                elif diff_sec > 1:
-                    time.sleep(0.5)
-                else:
-                    time.sleep(0.1)
-            else:
-                time.sleep(1)
-
-        # synchronize all threads to fire together
-        barrier.wait()
-
-        # 获取滑块验证码（如果需要）
-        captcha_id = ""
-        captcha_code = ""
-        if need_captcha:
-            captcha_id, captcha_code = _get_slide_captcha(access_token)
-            if not captcha_id:
-                logger.warning("线程 %d 滑块验证码获取失败", thread_id)
-
-        resp = make_appointment(access_token, time_id, resource_id, bookdate, kssj, jssj, id_token=id_token, captcha_id=captcha_id, captcha_code=captcha_code)
-        with results_lock:
-            results.append({"thread": thread_id, "response": resp})
-
-    threads = [threading.Thread(target=worker, args=(i + 1,)) for i in range(num_threads)]
-    for t in threads:
-        t.start()
-    for t in threads:
-        t.join()
-
-    return success_response({"threads": num_threads, "results": results})
-
 
 

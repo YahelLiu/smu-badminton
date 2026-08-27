@@ -9,7 +9,7 @@ CAS 认证流程模块。
 - 所有公开函数参数顺序：必需参数在前，可选参数在后
 """
 import base64
-import json
+import re
 import requests
 from urllib.parse import urlparse, parse_qs, urlencode, quote, urljoin, unquote
 from lxml import html
@@ -17,7 +17,7 @@ from .cas_ocr import predict_validate_code
 import os
 import time
 import logging
-from typing import Any, Dict, Tuple, Optional
+from typing import Dict, Tuple, Optional
 from enum import Enum
 from dataclasses import dataclass
 
@@ -136,8 +136,6 @@ def _resolve_cas_login_url(session: requests.Session, login_url: str | None, tim
 
         location = _absolute_url(current, resp.headers.get("Location", ""))
         if not location:
-            if resp.status_code == 200 and _is_cas_login_url(current):
-                return current
             break
 
         if _is_cas_login_url(location):
@@ -328,23 +326,8 @@ def _prepare_login_session_core(login_url: str, captcha_url: str | None = None) 
     return session, cas_login_url, execution_value, captcha_image, captcha_token, login_page_html
 
 
-def get_captcha_and_params(login_url, captcha_url):
-    """从 WF 流程解析 CAS 登录地址，并获取验证码、token 与 execution。"""
-    session, cas_login_url, execution_value, captcha_image, captcha_token, _ = _prepare_login_session_core(login_url, captcha_url)
-    # OCR 识别验证码
-    result, *_ = predict_validate_code(captcha_image)
-    return session, cas_login_url, execution_value, result, captcha_token
-
-
-# cas_login 已移除，统一使用 cas_login_stable
-
-
-# ---- 稳定登录兜底实现 ----
-from lxml import html as lxml_html
-
-
 def _stable_extract_execution(html_text: str):
-    tree = lxml_html.fromstring(html_text)
+    tree = html.fromstring(html_text)
     xps = [
         "//input[@name='execution']/@value",
         "//input[@id='execution']/@value",
@@ -502,7 +485,6 @@ def _detect_login_error(html_text: str) -> LoginErrorType:
 
     # 打印部分 HTML 用于调试 - 查找错误信息
     # 查找 loginErrorsPanel 或其他错误提示
-    import re
     error_match = re.search(r'<div[^>]*id="loginErrorsPanel"[^>]*>.*?<p>(.*?)</p>', html_text, re.DOTALL)
     if error_match:
         error_msg = error_match.group(1).strip()

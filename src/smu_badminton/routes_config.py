@@ -6,13 +6,12 @@
 import importlib
 import logging
 import os
-from typing import Dict
 
 from fastapi import APIRouter
 from dotenv import load_dotenv
 
 from .server_models import UpdateConfigRequest
-from .config import get_frontend_config, AUTHORIZED_USERS, BASE_DIR
+from .config import AUTHORIZED_USERS, BASE_DIR
 
 logger = logging.getLogger(__name__)
 
@@ -37,7 +36,7 @@ async def update_config(req: UpdateConfigRequest):
     """
     # 权限检查
     if req.current_username not in AUTHORIZED_USERS:
-        logger.warning(f"权限拒绝：用户试图更新配置")
+        logger.warning("权限拒绝：用户试图更新配置")
         return {"ok": False, "error": "permission_denied", "message": "无权更新配置"}
 
     try:

@@ -35,7 +35,6 @@ RUN pip install --no-cache-dir --upgrade pip setuptools wheel \
     && pip install --no-cache-dir -e .
 
 # 复制运行时文件
-COPY model/ /app/model/
 COPY templates/ /app/templates/
 COPY static/ /app/static/
 

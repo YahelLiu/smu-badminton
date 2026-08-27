@@ -21,8 +21,8 @@ features:
     details: 一键发起预约请求，自动登录、查询场地可用性、提交预约，全流程自动化
   - title: 定时抢场
     details: 设定目标时间，多线程 Barrier 同步并发抢场，分级休眠策略适配长时间等待
-  - title: OCR 验证码识别
-    details: 基于 NCNN ResNet 模型的验证码自动识别，支持本地推理和远程 HTTP/TCP 服务
+  - title: 验证码识别
+    details: 基于 ddddocr 的算术验证码整图识别，纯本地推理，无需额外模型文件或远程 OCR 服务
   - title: 公共缓存加速
     details: 场地时间槽数据 60s 公共缓存跨用户共享，仅 bookedByMe 按用户单独查询
   - title: 任务持久化

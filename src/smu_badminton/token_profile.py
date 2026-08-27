@@ -38,15 +38,7 @@ _TOKEN_LOCK = threading.Lock()
 # ============= Profile 缓存 =============
 
 _TOKEN_PROFILE_CACHE: Dict[str, Dict[str, Any]] = {}
-_TOKEN_PROFILE_LOCK: Any = None  # 延迟初始化
-
-
-def _get_profile_lock():
-    """延迟初始化 profile 锁。"""
-    global _TOKEN_PROFILE_LOCK
-    if _TOKEN_PROFILE_LOCK is None:
-        _TOKEN_PROFILE_LOCK = threading.Lock()
-    return _TOKEN_PROFILE_LOCK
+_TOKEN_PROFILE_LOCK = threading.Lock()
 
 
 def decode_jwt_payload(token: str) -> Dict[str, Any] | None:
@@ -97,6 +89,18 @@ def profile_from_claims(claims: Dict[str, Any] | None) -> Dict[str, Any] | None:
     }
 
 
+def token_exp_epoch(access_token: str) -> Optional[float]:
+    """读取 access_token JWT 里的 exp（Unix 秒）。无法解析返回 None。"""
+    claims = decode_jwt_payload(access_token)
+    if not claims:
+        return None
+    exp = claims.get("exp")
+    try:
+        return float(exp) if exp else None
+    except (TypeError, ValueError):
+        return None
+
+
 def _cleanup_profile_cache():
     """清理过期的 profile 缓存项。"""
     now = time.time()
@@ -125,7 +129,7 @@ def cache_profile_from_tokens(tokens: Dict[str, Any] | None):
     if not profile:
         return
 
-    with _get_profile_lock():
+    with _TOKEN_PROFILE_LOCK:
         _cleanup_profile_cache()
         _TOKEN_PROFILE_CACHE[access_token] = {"profile": profile, "ts": time.time()}
 
@@ -133,7 +137,7 @@ def cache_profile_from_tokens(tokens: Dict[str, Any] | None):
 def get_profile_by_access_token(access_token: str) -> Dict[str, Any] | None:
     """通过 access_token 获取缓存的 profile。"""
     now = time.time()
-    with _get_profile_lock():
+    with _TOKEN_PROFILE_LOCK:
         entry = _TOKEN_PROFILE_CACHE.get(access_token)
         if entry and now - float(entry.get("ts", 0)) < float(TOKEN_PROFILE_TTL_SEC):
             return entry.get("profile")
@@ -179,7 +183,7 @@ def build_user_info_from_profile(profile: Dict[str, Any] | None) -> Dict[str, An
 
 def clear_profile_cache(access_token: str = None):
     """清理 profile 缓存；若指定 access_token，仅清理该 token。"""
-    with _get_profile_lock():
+    with _TOKEN_PROFILE_LOCK:
         if access_token:
             _TOKEN_PROFILE_CACHE.pop(access_token, None)
         else:
@@ -424,11 +428,3 @@ def refresh_token_for_user(username: str, max_attempts: int = 2) -> Optional[Dic
 
     logger.error("刷新 token 最终失败: %s（已尝试 %d 次）", username, max_attempts)
     return None
-
-
-class TokenRefreshError(Exception):
-    """Token 刷新失败异常。"""
-    def __init__(self, username: str, message: str = "Token 刷新失败，请重新登录"):
-        self.username = username
-        self.message = message
-        super().__init__(self.message)

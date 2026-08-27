@@ -8,8 +8,6 @@ services:
     volumes:
       # 数据库持久化（Docker volume，不同步到本地）
       - smu-badminton-data:/app/data
-      # OCR 模型文件（较大，不打包进镜像）
-      - ./model:/app/model:ro
       # 环境变量配置
       - ./.env:/app/.env:ro
     environment:

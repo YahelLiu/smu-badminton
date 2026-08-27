@@ -16,7 +16,7 @@ from fastapi.concurrency import run_in_threadpool
 from .server_models import (
     CaptchaRequest, CaptchaResponse,
     LoginRequest, LoginResponse,
-    LogoutRequest,
+    LogoutRequest, RefreshRequest,
 )
 from .cas_login import (
     prepare_login_session,
@@ -25,7 +25,10 @@ from .cas_login import (
     attempt_login_with_captcha,
     LoginErrorType,
 )
-from .token_profile import cache_token_for_user, clear_token_cache, save_user_account
+from .token_profile import (
+    cache_token_for_user, clear_token_cache, save_user_account,
+    refresh_token_for_user,
+)
 from .config import CAS_LOGIN_URL, CAS_CAPTCHA_URL, AUTHORIZED_USERS
 
 logger = logging.getLogger(__name__)
@@ -186,9 +189,27 @@ async def api_login(req: LoginRequest):
         return LoginResponse(ok=False, error=str(e), error_type="network_error")
 
 
+@router.post("/auth/refresh", response_model=LoginResponse)
+async def api_refresh(req: RefreshRequest):
+    """静默续期：用服务端保存的账号重新登录换取新 token。
+
+    前端遇到 token 过期时先调此接口，成功则无缝继续；
+    只有从未在服务端登录过（无保存凭据）才需要弹登录框。
+    """
+    try:
+        tokens = await run_in_threadpool(refresh_token_for_user, req.username)
+        if not tokens or not tokens.get("access_token"):
+            return LoginResponse(ok=False, error="刷新失败：未找到已保存的账号或登录失败",
+                                 error_type="refresh_failed")
+        return LoginResponse(ok=True, data={"access_token": tokens["access_token"]})
+    except Exception as e:
+        logger.error("静默续期失败: %s", e)
+        return LoginResponse(ok=False, error=str(e), error_type="network_error")
+
+
 @router.post("/logout")
 async def api_logout(req: LogoutRequest):
     """登出接口，清除 token 缓存。"""
     clear_token_cache(req.username)
-    logger.info(f"用户已登出，token 缓存已清除")
+    logger.info("用户已登出，token 缓存已清除")
     return {"ok": True}

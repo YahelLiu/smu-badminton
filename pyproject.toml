@@ -16,13 +16,15 @@ dependencies = [
     "starlette==0.47.3",
     "pydantic==2.11.9",
     "python-dotenv==1.1.1",
+    "orjson==3.11.9",
     "requests==2.32.4",
     "beautifulsoup4==4.13.4",
     "lxml==6.0.0",
     "pillow==11.3.0",
     "opencv-python==4.12.0.88",
-    "ncnn==1.0.20250503",
     "numpy==2.2.6",
+    "ddddocr>=1.4.7",  # 算式验证码整图识别(数字/运算符)。自训 NCNN ResNet 换字体后失效且无法重训，已弃用
+    "pycryptodome>=3.20.0",  # captchaCode AES-128-CBC 加密(复现 SPA w()), 也兼容 cryptography 作回退
     "tqdm==4.67.1",
 ]
 

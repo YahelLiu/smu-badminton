@@ -8,6 +8,7 @@
 4. 结构化日志 - 便于问题追踪
 """
 
+import base64
 import logging
 import os
 import sqlite3
@@ -16,6 +17,8 @@ import time
 from functools import wraps
 from typing import Optional, Callable, Any, TypeVar
 from contextlib import contextmanager
+
+from .config import SECRET_KEY
 
 # 配置日志
 logger = logging.getLogger(__name__)
@@ -374,9 +377,6 @@ def close_db_pool():
 
 
 # ============= 密码混淆工具 =============
-
-import base64
-from .config import SECRET_KEY
 
 def obfuscate_password(password: str) -> str:
     """

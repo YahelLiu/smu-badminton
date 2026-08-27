@@ -208,3 +208,61 @@ def get_target_datetime_from_network(
     full_datetime_str = f"{target_date_str} {target_time_str}"
     target_time = datetime.strptime(full_datetime_str, "%Y-%m-%d %H:%M:%S").replace(tzinfo=_BEIJING_TZ)
     return target_time
+
+
+# ============= 本地时钟偏移校准 =============
+
+class ClockSync:
+    """本地时钟与网络时间的偏移校准。
+
+    抢票等待循环若每轮都请求网络对时，等待精度就等于该 HTTP 的 RTT 抖动
+    （几十到几百 ms，且有被限流风险）。正确做法：在预取窗口测一次
+    「网络时间 − 本地时间」偏移量，之后等待循环全部使用 本地钟 + offset，
+    关键窗口内不再发出任何非预约请求。
+    """
+
+    _SYNC_URL = "https://cube.meituan.com/ipromotion/cube/toc/component/base/getServerCurrentTime"
+
+    def __init__(self) -> None:
+        self.offset_sec: Optional[float] = None
+        self.synced_at: float = 0.0
+
+    def _measure_once(self) -> Optional[float]:
+        """单次采样：服务器毫秒时间戳 − 本地发包/收包中点。"""
+        try:
+            t0 = time.time()
+            response = requests.get(self._SYNC_URL, timeout=3)
+            t1 = time.time()
+            if response.status_code != 200:
+                return None
+            ts_ms = int(response.json()["data"])
+            return ts_ms / 1000.0 - (t0 + t1) / 2.0
+        except Exception as e:
+            logger.warning("网络对时采样失败: %s", e)
+            return None
+
+    def sync(self, samples: int = 3) -> Optional[float]:
+        """采样多次取中位数作为偏移。全部失败返回 None 并保持旧值。"""
+        offsets = []
+        for _ in range(samples):
+            off = self._measure_once()
+            if off is not None:
+                offsets.append(off)
+            time.sleep(0.05)
+        if offsets:
+            offsets.sort()
+            self.offset_sec = offsets[len(offsets) // 2]
+            self.synced_at = time.time()
+            logger.info("[性能] 时钟偏移校准: %+.3fs（样本 %d 个）", self.offset_sec, len(offsets))
+        else:
+            logger.warning("网络对时全部失败，继续沿用偏移值: %r", self.offset_sec)
+        return self.offset_sec
+
+    def now(self) -> datetime:
+        """当前北京时间 = 本地钟 + 校准偏移。未同步时即本机时间。"""
+        base = time.time() + (self.offset_sec or 0.0)
+        return datetime.fromtimestamp(base, tz=_BEIJING_TZ)
+
+    @property
+    def is_synced(self) -> bool:
+        return self.offset_sec is not None
